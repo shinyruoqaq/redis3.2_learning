@@ -203,7 +203,7 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {
 
     len = sdslen(s);
     sh = (char*)s-sdsHdrSize(oldtype);
-    newlen = (len+addlen);
+    newlen = (len+addlen);      // 往后追加空间
     if (newlen < SDS_MAX_PREALLOC)
         newlen *= 2;
     else

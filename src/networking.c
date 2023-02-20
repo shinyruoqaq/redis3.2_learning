@@ -1064,7 +1064,7 @@ int processInlineBuffer(client *c) {
     size_t querylen;
 
     /* Search for end of line */
-    newline = strchr(c->querybuf,'\n');
+    newline = strchr(c->querybuf,'\n');  // strchr:寻找给定字符在字符串中第一次出现的位置
 
     /* Nothing to do without a \r\n */
     if (newline == NULL) {
@@ -1097,12 +1097,12 @@ int processInlineBuffer(client *c) {
         c->repl_ack_time = server.unixtime;
 
     /* Leave data after the first line of the query in the buffer */
-    sdsrange(c->querybuf,querylen+2,-1);
+    sdsrange(c->querybuf,querylen+2,-1);    // 更新querybuf
 
     /* Setup argv array on client structure */
     if (argc) {
         if (c->argv) zfree(c->argv);
-        c->argv = zmalloc(sizeof(robj*)*argc);
+        c->argv = zmalloc(sizeof(robj*)*argc);  // argc前面是乘吧
     }
 
     /* Create redis objects for all arguments. */
@@ -1308,7 +1308,7 @@ void processInputBuffer(client *c) {
             resetClient(c);
         } else {
             /* Only reset the client when the command was executed. */
-            if (processCommand(c) == C_OK)
+            if (processCommand(c) == C_OK)      // 执行命令
                 resetClient(c);
             /* freeMemoryIfNeeded may flush slave output buffers. This may result
              * into a slave, that may be the active client, to be freed. */
@@ -1341,9 +1341,9 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
 
     qblen = sdslen(c->querybuf);
-    if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
+    if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;     // 更新querybuf使用峰值
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
-    nread = read(fd, c->querybuf+qblen, readlen);
+    nread = read(fd, c->querybuf+qblen, readlen);   // 读数据
     if (nread == -1) {
         if (errno == EAGAIN) {
             return;

@@ -84,7 +84,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     retval = select(eventLoop->maxfd+1,
                 &state->_rfds,&state->_wfds,NULL,tvp);
     if (retval > 0) {
-        for (j = 0; j <= eventLoop->maxfd; j++) {
+        for (j = 0; j <= eventLoop->maxfd; j++) {   // 遍历所有被监听的文件描述符(fd)，找到有读或写事件的fd，构造成事件对象保存到eventloop.fired数组中
             int mask = 0;
             aeFileEvent *fe = &eventLoop->events[j];
 
