@@ -262,7 +262,7 @@ unsigned int zipEncodeLength(unsigned char *p, unsigned char encoding, unsigned 
 unsigned int zipPrevEncodeLength(unsigned char *p, unsigned int len) {
     if (p == NULL) {
         return (len < ZIP_BIGLEN) ? 1 : sizeof(len)+1;  // entry长度小于254，prevlensize为1，否则为5
-    } else {
+    } else {    // 如果p非空，则还需要把prevlen的值写到对应位置
         if (len < ZIP_BIGLEN) {
             p[0] = len;
             return 1;
@@ -582,7 +582,7 @@ unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int
     return zl;
 }
 
-/* Insert item at "p". 插入到*p此时指向的位置。也就是会使新元素的next为此时*p指向的元素 */
+/* Insert item at "p". 插入到*p此时指向的位置。也就是会使新元素的next为此时*p指向的元素。（逻辑上也不是很复杂，主要是计算内存地址，比较琐碎） */
 unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen) {
     size_t curlen = intrev32ifbe(ZIPLIST_BYTES(zl)), reqlen;
     unsigned int prevlensize, prevlen = 0;
@@ -634,7 +634,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     p = zl+offset;
 
     /* Apply memory move when necessary and update tail offset. */
-    if (p[0] != ZIP_END) {
+    if (p[0] != ZIP_END) {  // 插入到中间
         /* Subtract one because of the ZIP_END bytes */
         memmove(p+reqlen,p-nextdiff,curlen-offset-1+nextdiff);
 
@@ -644,7 +644,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
         else
             zipPrevEncodeLength(p+reqlen,reqlen);
 
-        /* Update offset for tail */
+        /* Update offset for tail.更新tail字段 */
         ZIPLIST_TAIL_OFFSET(zl) =
             intrev32ifbe(intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl))+reqlen);
 
@@ -656,7 +656,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
             ZIPLIST_TAIL_OFFSET(zl) =
                 intrev32ifbe(intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl))+nextdiff);
         }
-    } else {
+    } else {    // 插入到末尾
         /* This element will be the new tail. */
         ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(p-zl);
     }
