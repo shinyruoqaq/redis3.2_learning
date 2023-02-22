@@ -118,18 +118,18 @@
 /* Different encoding/length possibilities */
 #define ZIP_STR_MASK 0xc0       // 1100 0000
 #define ZIP_INT_MASK 0x30
-#define ZIP_STR_06B (0 << 6)    // 0
+#define ZIP_STR_06B (0 << 6)    // 0000 0000
 #define ZIP_STR_14B (1 << 6)    // 0100 0000
 #define ZIP_STR_32B (2 << 6)    // 1000 0000
-#define ZIP_INT_16B (0xc0 | 0<<4)
-#define ZIP_INT_32B (0xc0 | 1<<4)
-#define ZIP_INT_64B (0xc0 | 2<<4)
-#define ZIP_INT_24B (0xc0 | 3<<4)
-#define ZIP_INT_8B 0xfe
+#define ZIP_INT_16B (0xc0 | 0<<4)   // 1100 0000
+#define ZIP_INT_32B (0xc0 | 1<<4)   // 1101 0000
+#define ZIP_INT_64B (0xc0 | 2<<4)   // 1110 0000
+#define ZIP_INT_24B (0xc0 | 3<<4)   // 1111 0000
+#define ZIP_INT_8B 0xfe             // 1111 1110
 /* 4 bit integer immediate encoding */
-#define ZIP_INT_IMM_MASK 0x0f
-#define ZIP_INT_IMM_MIN 0xf1    /* 11110001 */
-#define ZIP_INT_IMM_MAX 0xfd    /* 11111101 */
+#define ZIP_INT_IMM_MASK 0x0f   // 0000 1111
+#define ZIP_INT_IMM_MIN 0xf1    /* 1111 0001 */
+#define ZIP_INT_IMM_MAX 0xfd    /* 1111 1101 */
 #define ZIP_INT_IMM_VAL(v) (v & ZIP_INT_IMM_MASK)
 
 #define INT24_MAX 0x7fffff
@@ -204,7 +204,7 @@ unsigned int zipEncodeLength(unsigned char *p, unsigned char encoding, unsigned 
         if (rawlen <= 0x3f) {   // 原始内容长度<=0x3f时，len占1字节，只使用低14位存储长度，高2位固定为00.   (0x3f: 0011 1111, 63)
             if (!p) return len;
             buf[0] = ZIP_STR_06B | rawlen;
-        } else if (rawlen <= 0x3fff) {      // 0x3f<原始内容长度<=0x3fff(16384)时，len占两字节，只使用低14位存储长度，高2位固定为01
+        } else if (rawlen <= 0x3fff) {      // 0x3f(63)<原始内容长度<=0x3fff(16383)时，len占两字节，只使用低14位存储长度，高2位固定为01
             len += 1;       // len = 2;
             if (!p) return len;
             buf[0] = ZIP_STR_14B | ((rawlen >> 8) & 0x3f);   // rawlen的第9-14位放到len的第一个字节
@@ -333,18 +333,22 @@ int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, un
     if (string2ll((char*)entry,entrylen,&value)) {
         /* Great, the string can be encoded. Check what's the smallest
          * of our encoding types that can hold this value. */
-        if (value >= 0 && value <= 12) {
-            *encoding = ZIP_INT_IMM_MIN+value;
+        if (value >= 0 && value <= 12) {    // [0, 12]
+            /* 将值与编码一起存储
+             * 后4位只有0001~1101(13)能用来表示数字，（因为0000和1110已经被占了，1111的话又和结束标记冲突
+             * 所以只能表示13个数。所以只能存[0,12]。 说白了就是用1~13来存储0~12
+             * 具体读取时，将后四位值减1就是实际值了。*/
+            *encoding = ZIP_INT_IMM_MIN/*1111 0001*/+value;
         } else if (value >= INT8_MIN && value <= INT8_MAX) {
-            *encoding = ZIP_INT_8B;
+            *encoding = ZIP_INT_8B;     // 1111 1110
         } else if (value >= INT16_MIN && value <= INT16_MAX) {
-            *encoding = ZIP_INT_16B;
+            *encoding = ZIP_INT_16B;    // 1100 0000
         } else if (value >= INT24_MIN && value <= INT24_MAX) {
-            *encoding = ZIP_INT_24B;
+            *encoding = ZIP_INT_24B;    // 1111 0000
         } else if (value >= INT32_MIN && value <= INT32_MAX) {
-            *encoding = ZIP_INT_32B;
+            *encoding = ZIP_INT_32B;    // 1101 0000
         } else {
-            *encoding = ZIP_INT_64B;
+            *encoding = ZIP_INT_64B;    // 1110 0000
         }
         *v = value;
         return 1;
@@ -626,8 +630,9 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
         }
     }
 
-    /* See if the entry can be encoded */
-    if (zipTryEncoding(s,slen,&value,&encoding)) {  // 尝试转成整型
+    /* See if the entry can be encoded
+     * 尝试转long，且为value和encoding变量赋值*/
+    if (zipTryEncoding(s,slen,&value,&encoding)) {
         /* 'encoding' is set to the appropriate integer encoding */
         reqlen = zipIntSize(encoding);
     } else {
@@ -638,7 +643,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     /* We need space for both the length of the previous entry and
      * the length of the payload. 计算新元素所需空间。 */
     reqlen += zipPrevEncodeLength(NULL,prevlen);
-    reqlen += zipEncodeLength(NULL,encoding,slen);   // 根据内容长度和编码规则，确定并返回len字段所占长度
+    reqlen += zipEncodeLength(NULL,encoding,slen);   // 根据内容长度和编码规则，确定并返回len(即encode)字段所占长度
 
     /* When the insert position is not equal to the tail, we need to
      * make sure that the next entry can hold this entry's length in
@@ -646,14 +651,20 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     int forcelarge = 0;
     nextdiff = (p[0] != ZIP_END) ? zipPrevLenByteDiff(p,reqlen) : 0;
     // nextdiff=-4说明next.prevlensize以前是5，现在只要1了，因为new.reqlen可以用一个字节表示。（nextdiff只可能为4,-1,0）
-    if (nextdiff == -4 && reqlen < 4) {  // 此时new.prevlensize为5，所以理论上reqlen不可能小于4啊（但实际上会发生，因为级联更新时的特殊操作）
+    if (nextdiff == -4 && reqlen < 4) {
+        /*此时new.prevlensize为5，所以理论上reqlen不可能小于4啊
+         * （但实际上会发生，因为级联更新时为避免级联缩小，会用原来5字节长的prevlen来存储可以用1字节表示的新的prevlen）
+         * 如果没有if判断的这段逻辑会怎样呢？
+         * 此时，意味着nextdiff + reqlen < 0，意味着插入一个元素，ziplist长度反而缩小了！这并不符合插入的预期。*/
         nextdiff = 0;
         forcelarge = 1;
     }
 
     /* Store offset because a realloc may change the address of zl. */
     offset = p-zl;  // 计算插入位置在ziplist中的偏移量。
-    zl = ziplistResize(zl,curlen+reqlen+nextdiff);  // 为ziplist重新分配内存，并把旧数据复制过来(realloc)
+    /* 为ziplist重新分配内存(realloc)。
+     * 假如reqlen+nextdiff < 0，也就是说ziplist变小，此时末尾数据丢失，造成了数据损坏*/
+    zl = ziplistResize(zl,curlen+reqlen+nextdiff);
     p = zl+offset;
 
     /* Apply memory move when necessary and update tail offset. */
@@ -706,7 +717,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     } else {
         zipSaveInteger(p,value,encoding);
     }
-    ZIPLIST_INCR_LENGTH(zl,1);
+    ZIPLIST_INCR_LENGTH(zl,1);  // ziplist.len ++
     return zl;
 }
 
