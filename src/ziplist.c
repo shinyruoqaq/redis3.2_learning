@@ -615,7 +615,9 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
 
     /* Find out prevlen for the entry that is inserted. */
     if (p[0] != ZIP_END/*255，结束标记*/) {  // 如果是插入到中间
-        ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);    // 为prevlensize和prevlen赋值
+        // 为prevlensize和prevlen赋值
+        // 注意下，就算prevlensize=5，prevlen也有可能小于254，这是级联更新强行避免缩容 造成的
+        ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);
     } else {    // 如果是插入到末尾
         unsigned char *ptail = ZIPLIST_ENTRY_TAIL(zl);  // ptail是末尾元素，而非结束标记
         if (ptail[0] != ZIP_END) {  // 如果一个元素都没有，那么ptail指向的自然是 结束标记
