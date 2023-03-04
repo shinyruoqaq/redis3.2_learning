@@ -174,7 +174,8 @@ dict *dictCreate(dictType *type,
     return d;
 }
 
-/* Initialize the hash table */
+/* Initialize the hash table
+ * 可以看到并没有为dictht.table分配空间。意味着要等第一个元素插入*/
 int _dictInit(dict *d, dictType *type,
         void *privDataPtr)
 {
@@ -242,11 +243,11 @@ int dictExpand(dict *d, unsigned long size)
  * guaranteed that this function will rehash even a single bucket, since it
  * will visit at max N*10 empty buckets in total, otherwise the amount of
  * work it does would be unbound and the function may block for a long time. */
-int dictRehash(dict *d, int n) {
+int dictRehash(dict *d, int n/*搬n个bucket*/) {
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
     if (!dictIsRehashing(d)) return 0;
 
-    while(n-- && d->ht[0].used != 0) {
+    while(n-- && d->ht[0].used != 0) {  /* 步数达到了或者ht[0]空了，就退出 */
         dictEntry *de, *nextde;
 
         /* Note that rehashidx can't overflow as we are sure there are more
@@ -254,6 +255,7 @@ int dictRehash(dict *d, int n) {
         assert(d->ht[0].size > (unsigned long)d->rehashidx);
         while(d->ht[0].table[d->rehashidx] == NULL) {
             d->rehashidx++;
+            /* 连续访问了n*10个空的bucket，直接退出 */
             if (--empty_visits == 0) return 1;
         }
         de = d->ht[0].table[d->rehashidx];
@@ -262,9 +264,9 @@ int dictRehash(dict *d, int n) {
             unsigned int h;
 
             nextde = de->next;
-            /* Get the index in the new hash table */
+            /* Get the index in the new hash table. 该key在新hash表的索引 */
             h = dictHashKey(d, de->key) & d->ht[1].sizemask;
-            de->next = d->ht[1].table[h];
+            de->next = d->ht[1].table[h];   /* 头插法 */
             d->ht[1].table[h] = de;
             d->ht[0].used--;
             d->ht[1].used++;
@@ -313,18 +315,23 @@ int dictRehashMilliseconds(dict *d, int ms) {
  *
  * This function is called by common lookup or update operations in the
  * dictionary so that the hash table automatically migrates from H1 to H2
- * while it is actively used. */
+ * while it is actively used.
+ * 查找和更新时会调这个函数 */
 static void _dictRehashStep(dict *d) {
+    /* 如果没有在使用迭代器遍历，才能去推进rehash。
+     * 说白了就是在迭代时不要去搬东西*/
     if (d->iterators == 0) dictRehash(d,1);
 }
 
-/* Add an element to the target hash table */
+/* Add an element to the target hash table
+ * 注意，这个函数仅会去添加元素！如果元素已存在，是不会去更新value的。而是返回ERR */
 int dictAdd(dict *d, void *key, void *val)
 {
+    /* 添加元素，但不设value */
     dictEntry *entry = dictAddRaw(d,key);
 
     if (!entry) return DICT_ERR;
-    dictSetVal(d, entry, val);
+    dictSetVal(d, entry, val);  /* 设置value */
     return DICT_OK;
 }
 
@@ -342,31 +349,35 @@ int dictAdd(dict *d, void *key, void *val)
  *
  * If key already exists NULL is returned.
  * If key was added, the hash entry is returned to be manipulated by the caller.
+ *
+ * 仅添加元素，但不会去设置value，而是返回dictEntry对象。（这样写感觉使得代码分工更加明确）
  */
 dictEntry *dictAddRaw(dict *d, void *key)
 {
     int index;
     dictEntry *entry;
     dictht *ht;
-
+    /* 推进rehash */
     if (dictIsRehashing(d)) _dictRehashStep(d);
 
     /* Get the index of the new element, or -1 if
-     * the element already exists. */
+     * the element already exists.
+     * 查找对应的桶，如果桶中已存在该元素，则返回NULL */
     if ((index = _dictKeyIndex(d, key)) == -1)
         return NULL;
 
     /* Allocate the memory and store the new entry.
      * Insert the element in top, with the assumption that in a database
      * system it is more likely that recently added entries are accessed
-     * more frequently. */
+     * more frequently.
+     * 可以看到，正在rehash的话，元素是添加到ht[1] */
     ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
     entry = zmalloc(sizeof(*entry));
-    entry->next = ht->table[index];
+    entry->next = ht->table[index];   /* 头插法 */
     ht->table[index] = entry;
     ht->used++;
 
-    /* Set the hash entry fields. */
+    /* Set the hash entry fields. 设置dictEntry.key */
     dictSetKey(d, entry, key);
     return entry;
 }
@@ -374,7 +385,9 @@ dictEntry *dictAddRaw(dict *d, void *key)
 /* Add an element, discarding the old if the key already exists.
  * Return 1 if the key was added from scratch, 0 if there was already an
  * element with such key and dictReplace() just performed a value update
- * operation. */
+ * operation.
+ *
+ * 插入或更新。（注意区分于dictAdd） */
 int dictReplace(dict *d, void *key, void *val)
 {
     dictEntry *entry, auxentry;
@@ -383,15 +396,20 @@ int dictReplace(dict *d, void *key, void *val)
      * does not exists dictAdd will suceed. */
     if (dictAdd(d, key, val) == DICT_OK)
         return 1;
-    /* It already exists, get the entry */
+    /* It already exists, get the entry
+     * 这里不是很好，元素已存在的话，又查找一次 */
     entry = dictFind(d, key);
     /* Set the new value and free the old one. Note that it is important
      * to do that in this order, as the value may just be exactly the same
      * as the previous one. In this context, think to reference counting,
      * you want to increment (set), and then decrement (free), and not the
-     * reverse. */
+     * reverse.
+     * 注意下这里的操作顺序，要先set，再free。
+     * 因为新value和旧value可能就是同一个对象，如果先free会导致对象被回收
+     * 由于dictTreeVal执行的就是对应的析构函数=> dictObjectDestructor，该函数就是将robj.refcount减1.
+     * 所以我们应该先set，保证引用计数大于0，再去free*/
     auxentry = *entry;
-    dictSetVal(d, entry, val);
+    dictSetVal(d, entry, val);  // 问题是这里并没有使refcount+1啊..
     dictFreeVal(d, &auxentry);
     return 0;
 }
@@ -495,10 +513,10 @@ dictEntry *dictFind(dict *d, const void *key)
     unsigned int h, idx, table;
 
     if (d->ht[0].used + d->ht[1].used == 0) return NULL; /* dict is empty */
-    if (dictIsRehashing(d)) _dictRehashStep(d);
-    h = dictHashKey(d, key);
-    for (table = 0; table <= 1; table++) {
-        idx = h & d->ht[table].sizemask;
+    if (dictIsRehashing(d)) _dictRehashStep(d);  /* 如果正在进行重hash，则将该工作推进一步 */
+    h = dictHashKey(d, key);    /* 计算hash值 */
+    for (table = 0; table <= 1; table++) {  // 两个hash表都要遍历
+        idx = h & d->ht[table].sizemask;    // 相当于对数组长度取模
         he = d->ht[table].table[idx];
         while(he) {
             if (key==he->key || dictCompareKeys(d, key, he->key))

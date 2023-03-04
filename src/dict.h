@@ -46,6 +46,7 @@
 
 typedef struct dictEntry {
     void *key;
+    /* value是一个union(共用体): union占用内存取决于最长的那个字段，所有字段共用这一片内存。意味着同时只会有一个字段有效 */
     union {
         void *val;
         uint64_t u64;
@@ -57,9 +58,12 @@ typedef struct dictEntry {
 
 typedef struct dictType {
     unsigned int (*hashFunction)(const void *key);
+    /* key和value的拷贝函数。（源码里好像都是赋值为NULL。。） */
     void *(*keyDup)(void *privdata, const void *key);
     void *(*valDup)(void *privdata, const void *obj);
+    /* key的比较函数 */
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
+    /* 析构函数: key或value销毁时会手动调用。dictObjectDestructor */
     void (*keyDestructor)(void *privdata, void *key);
     void (*valDestructor)(void *privdata, void *obj);
 } dictType;
@@ -67,16 +71,16 @@ typedef struct dictType {
 /* This is our hash table structure. Every dictionary has two of this as we
  * implement incremental rehashing, for the old to the new table. */
 typedef struct dictht {
-    dictEntry **table;
-    unsigned long size;
+    dictEntry **table;    /* entry数组 */
+    unsigned long size;   /* 数组长度 */
     unsigned long sizemask;
-    unsigned long used;
+    unsigned long used;   /* 元素个数 */
 } dictht;
 
 typedef struct dict {
-    dictType *type;
+    dictType *type; /* 存储一些元数据: 如hash函数 */
     void *privdata;
-    dictht ht[2];
+    dictht ht[2];   /* 两个hash表，一个用于增量式重hash。正常情况仅用h[0] */
     long rehashidx; /* rehashing not in progress if rehashidx == -1 */
     int iterators; /* number of iterators currently running */
 } dict;
@@ -90,7 +94,8 @@ typedef struct dictIterator {
     long index;
     int table, safe;
     dictEntry *entry, *nextEntry;
-    /* unsafe iterator fingerprint for misuse detection. */
+    /* unsafe iterator fingerprint for misuse detection.
+     * 用于误用检测的迭代器指纹。 （我猜类似java hashmap的modcount?） */
     long long fingerprint;
 } dictIterator;
 
