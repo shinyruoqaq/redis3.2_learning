@@ -95,11 +95,11 @@ quicklist *quicklistCreate(void) {
     struct quicklist *quicklist;
 
     quicklist = zmalloc(sizeof(*quicklist));
-    quicklist->head = quicklist->tail = NULL;
+    quicklist->head = quicklist->tail = NULL;   // 并没有使用哨兵节点
     quicklist->len = 0;
     quicklist->count = 0;
     quicklist->compress = 0;
-    quicklist->fill = -2;
+    quicklist->fill = -2;   // 默认一个ziplist最多装8kb
     return quicklist;
 }
 
@@ -131,7 +131,7 @@ void quicklistSetOptions(quicklist *quicklist, int fill, int depth) {
 /* Create a new quicklist with some default parameters. */
 quicklist *quicklistNew(int fill, int compress) {
     quicklist *quicklist = quicklistCreate();
-    quicklistSetOptions(quicklist, fill, compress);
+    quicklistSetOptions(quicklist, fill, compress);  /* 设置fill和compress参数*/
     return quicklist;
 }
 
@@ -142,7 +142,7 @@ REDIS_STATIC quicklistNode *quicklistCreateNode(void) {
     node->count = 0;
     node->sz = 0;
     node->next = node->prev = NULL;
-    node->encoding = QUICKLIST_NODE_ENCODING_RAW;
+    node->encoding = QUICKLIST_NODE_ENCODING_RAW;   // 编码为RAW，即非压缩
     node->container = QUICKLIST_NODE_CONTAINER_ZIPLIST;
     node->recompress = 0;
     return node;
@@ -348,7 +348,8 @@ REDIS_STATIC void __quicklistCompress(const quicklist *quicklist,
 /* Insert 'new_node' after 'old_node' if 'after' is 1.
  * Insert 'new_node' before 'old_node' if 'after' is 0.
  * Note: 'new_node' is *always* uncompressed, so if we assign it to
- *       head or tail, we do not need to uncompress it. */
+ *       head or tail, we do not need to uncompress it.
+ *  新节点总是不压缩的？那不是和compress参数含义冲突了嘛，什么时候会压缩呢？ */
 REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist,
                                         quicklistNode *old_node,
                                         quicklistNode *new_node, int after) {
@@ -373,7 +374,8 @@ REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist,
         if (quicklist->head == old_node)
             quicklist->head = new_node;
     }
-    /* If this insert creates the only element so far, initialize head/tail. */
+    /* If this insert creates the only element so far, initialize head/tail.
+     * 如果是唯一一个元素，为head和tail赋值 */
     if (quicklist->len == 0) {
         quicklist->head = quicklist->tail = new_node;
     }
@@ -479,12 +481,12 @@ REDIS_STATIC int _quicklistNodeAllowMerge(const quicklistNode *a,
  * Returns 1 if new head created. */
 int quicklistPushHead(quicklist *quicklist, void *value, size_t sz) {
     quicklistNode *orig_head = quicklist->head;
-    if (likely(
+    if (likely(     // likely(告诉编译器该分支可能性更大)
             _quicklistNodeAllowInsert(quicklist->head, quicklist->fill, sz))) {
         quicklist->head->zl =
             ziplistPush(quicklist->head->zl, value, sz, ZIPLIST_HEAD);
         quicklistNodeUpdateSz(quicklist->head);
-    } else {
+    } else {    // 目标节点装不下，则创建新的头节点。
         quicklistNode *node = quicklistCreateNode();
         node->zl = ziplistPush(ziplistNew(), value, sz, ZIPLIST_HEAD);
 

@@ -69,7 +69,7 @@ zskiplist *zslCreate(void) {
     zsl = zmalloc(sizeof(*zsl));
     zsl->level = 1;
     zsl->length = 0;
-    zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
+    zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);  // 哨兵头节点
     for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
         zsl->header->level[j].forward = NULL;
         zsl->header->level[j].span = 0;
@@ -108,56 +108,65 @@ int zslRandomLevel(void) {
 }
 
 zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
+    // 保存遍历过程中每一层的拐弯节点（拐弯节点就是每一层小于目标值的最后一个节点）
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
+    // 保存从header到每一层的拐弯节点的总跨度
     unsigned int rank[ZSKIPLIST_MAXLEVEL];
     int i, level;
 
     serverAssert(!isnan(score));
     x = zsl->header;
-    for (i = zsl->level-1; i >= 0; i--) {
+    for (i = zsl->level-1; i >= 0; i--) {   // 从最高层开始遍历
         /* store rank that is crossed to reach the insert position */
-        rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
-        while (x->level[i].forward &&
-            (x->level[i].forward->score < score ||
-                (x->level[i].forward->score == score &&
-                compareStringObjects(x->level[i].forward->obj,obj) < 0))) {
-            rank[i] += x->level[i].span;
-            x = x->level[i].forward;
+        rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];  // 初始值为上一层的累计跨度
+        while (x->level[i].forward &&   // 有next节点
+            (x->level[i].forward->score < score ||   // next节点score小于目标score
+                (x->level[i].forward->score == score &&    // next节点score等于目标score
+                compareStringObjects(x->level[i].forward->obj,obj) < 0))) {   // next节点key的字典序小于目标key
+            // while循环说白了就是next值比目标值小，所以还需要继续遍历
+            rank[i] += x->level[i].span;    // 累加跨度
+            x = x->level[i].forward;    // 继续遍历next节点
         }
-        update[i] = x;
+        update[i] = x;   // 保存拐弯节点
     }
     /* we assume the key is not already inside, since we allow duplicated
      * scores, and the re-insertion of score and redis object should never
      * happen since the caller of zslInsert() should test in the hash table
-     * if the element is already inside or not. */
-    level = zslRandomLevel();
-    if (level > zsl->level) {
+     * if the element is already inside or not.
+     * 待插入的元素一定是不存在的。
+     * 因为在插入前我们都会检查一下hash表，看key对应的元素是否存在。
+     * 如果存在，意味着是更新，会先删除再插入。*/
+    level = zslRandomLevel();   // 新节点可以到达的最高层
+    if (level > zsl->level) {   // 超过当前最高层
         for (i = zsl->level; i < level; i++) {
             rank[i] = 0;
-            update[i] = zsl->header;
-            update[i]->level[i].span = zsl->length;
+            update[i] = zsl->header;    // 超出的层数对应的拐弯节点自然是head
+            update[i]->level[i].span = zsl->length;  // 新层的head.next指向的是null，可看作是尾节点，所以span是总长度
         }
-        zsl->level = level;
+        zsl->level = level;   // 更新最大level
     }
     x = zslCreateNode(level,score,obj);
-    for (i = 0; i < level; i++) {
+    for (i = 0; i < level; i++) {       // 每一层都放一个节点
+        // 插入新节点
         x->level[i].forward = update[i]->level[i].forward;
         update[i]->level[i].forward = x;
 
-        /* update span covered by update[i] as x is inserted here */
+        /* update span covered by update[i] as x is inserted here
+         * 这个地方得画图才好理解*/
         x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
         update[i]->level[i].span = (rank[0] - rank[i]) + 1;
     }
 
     /* increment span for untouched levels */
     for (i = level; i < zsl->level; i++) {
-        update[i]->level[i].span++;
+        update[i]->level[i].span++;     // 因为元素多了一个，所以新层header到null的跨度也要+1
     }
 
+    // 这里有点奇怪，如果是插入到header后面，为什么不把prev设为header呢？
     x->backward = (update[0] == zsl->header) ? NULL : update[0];
-    if (x->level[0].forward)
+    if (x->level[0].forward)    // 有next节点
         x->level[0].forward->backward = x;
-    else
+    else    // 无next节点，说明该元素是尾节点。
         zsl->tail = x;
     zsl->length++;
     return x;
@@ -1205,7 +1214,7 @@ int zsetScore(robj *zobj, robj *member, double *score) {
 /* This generic command implements both ZADD and ZINCRBY. */
 #define ZADD_NONE 0
 #define ZADD_INCR (1<<0)    /* Increment the score instead of setting it. */
-#define ZADD_NX (1<<1)      /* Don't touch elements not already existing. */
+#define ZADD_NX (1<<1)      /* Don't touch elements not already existing. 注释错了吧？把already前的not去掉 */
 #define ZADD_XX (1<<2)      /* Only touch elements already exisitng. */
 #define ZADD_CH (1<<3)      /* Return num of elements added or updated. */
 void zaddGenericCommand(client *c, int flags) {
@@ -1359,6 +1368,7 @@ void zaddGenericCommand(client *c, int flags) {
                  * delete the key object from the skiplist, since the
                  * dictionary still has a reference to it. */
                 if (score != curscore) {
+                    // 先删再插
                     serverAssertWithInfo(c,curobj,zslDelete(zs->zsl,curscore,curobj));
                     znode = zslInsert(zs->zsl,score,curobj);
                     incrRefCount(curobj); /* Re-inserted in skiplist. */

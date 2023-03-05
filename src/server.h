@@ -354,7 +354,7 @@ typedef long long mstime_t; /* millisecond time type. */
 /* Anti-warning macro... */
 #define UNUSED(V) ((void) V)
 
-#define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^32 elements */
+#define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^32 elements. (log2(2^32)=32 */
 #define ZSKIPLIST_P 0.25      /* Skiplist P = 1/4 */
 
 /* Append only defines */
@@ -635,21 +635,24 @@ struct sharedObjectsStruct {
     *bulkhdr[OBJ_SHARED_BULKHDR_LEN];  /* "$<value>\r\n" */
 };
 
-/* ZSETs use a specialized version of Skiplists */
+/* ZSETs use a specialized version of Skiplists
+ * redis的skiplist并不是像我那样，真的同一个数的每一层都创建一个Node对象，再用指针把上下串起来。。
+ * 而是每个数只有一个node对象，然后用一个数组来保存每一层指向的next节点 */
 typedef struct zskiplistNode {
-    robj *obj;
+    robj *obj;      // hash表的key，即member
     double score;
-    struct zskiplistNode *backward;
+    struct zskiplistNode *backward;  // prev指针。一个node只有一个prev指针，在最底层。
     struct zskiplistLevel {
         struct zskiplistNode *forward;
-        unsigned int span;
-    } level[];
+        unsigned int span;   // 存储的是到next元素 中间的跨度。（所谓跨度就是投影到第一层后的位置之差）
+    } level[];  // 存储该节点在每一层的next节点，如果没有span字段，其实会定义为 zskiplistNode[] forward
 } zskiplistNode;
 
 typedef struct zskiplist {
+    /* header只是一个哨兵，而tail会指向实际节点 */
     struct zskiplistNode *header, *tail;
     unsigned long length;
-    int level;
+    int level;  // 此时ziplist的最高level
 } zskiplist;
 
 typedef struct zset {
