@@ -355,7 +355,8 @@ int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
     }
 }
 
-/* Try to encode a string object in order to save space */
+/* Try to encode a string object in order to save space
+ * 重新编码字符串对象，为了节省空间。 在这里就会做embstr的尝试*/
 robj *tryObjectEncoding(robj *o) {
     long value;
     sds s = o->ptr;

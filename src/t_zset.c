@@ -87,6 +87,7 @@ void zslFreeNode(zskiplistNode *node) {
 void zslFree(zskiplist *zsl) {
     zskiplistNode *node = zsl->header->level[0].forward, *next;
 
+    // 从头一直free到尾即可。不用关心层，层是每个节点的内部逻辑
     zfree(zsl->header);
     while(node) {
         next = node->level[0].forward;
@@ -102,12 +103,12 @@ void zslFree(zskiplist *zsl) {
  * levels are less likely to be returned. */
 int zslRandomLevel(void) {
     int level = 1;
-    while ((random()&0xFFFF) < (ZSKIPLIST_P * 0xFFFF))
+    while ((random()&0xFFFF) < (ZSKIPLIST_P * 0xFFFF))  // ZSKIPLIST_P:默认值0.25。也就是说1/4的概率升级
         level += 1;
     return (level<ZSKIPLIST_MAXLEVEL) ? level : ZSKIPLIST_MAXLEVEL;
 }
 
-zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
+zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj /* member */) {
     // 保存遍历过程中每一层的拐弯节点（拐弯节点就是每一层小于目标值的最后一个节点）
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
     // 保存从header到每一层的拐弯节点的总跨度
@@ -175,6 +176,7 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
 /* Internal function used by zslDelete, zslDeleteByScore and zslDeleteByRank */
 void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
     int i;
+    // 逐层删除
     for (i = 0; i < zsl->level; i++) {
         if (update[i]->level[i].forward == x) {
             update[i]->level[i].span += x->level[i].span - 1;
@@ -183,6 +185,7 @@ void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
             update[i]->level[i].span -= 1;
         }
     }
+    // 更新next的prev指针
     if (x->level[0].forward) {
         x->level[0].forward->backward = x->backward;
     } else {
@@ -201,7 +204,7 @@ int zslDelete(zskiplist *zsl, double score, robj *obj) {
     x = zsl->header;
     for (i = zsl->level-1; i >= 0; i--) {
         while (x->level[i].forward &&
-            (x->level[i].forward->score < score ||
+            (x->level[i].forward->score < score ||  // 用的是小于，说明如果有相同score，删除第一个
                 (x->level[i].forward->score == score &&
                 compareStringObjects(x->level[i].forward->obj,obj) < 0)))
             x = x->level[i].forward;
@@ -209,9 +212,9 @@ int zslDelete(zskiplist *zsl, double score, robj *obj) {
     }
     /* We may have multiple elements with the same score, what we need
      * is to find the element with both the right score and object. */
-    x = x->level[0].forward;
+    x = x->level[0].forward;    // 目标元素
     if (x && score == x->score && equalStringObjects(x->obj,obj)) {
-        zslDeleteNode(zsl, x, update);
+        zslDeleteNode(zsl, x, update);  // 逐层删除
         zslFreeNode(x);
         return 1;
     }
@@ -1211,12 +1214,15 @@ int zsetScore(robj *zobj, robj *member, double *score) {
  * Sorted set commands
  *----------------------------------------------------------------------------*/
 
-/* This generic command implements both ZADD and ZINCRBY. */
+/* This generic command implements both ZADD and ZINCRBY.
+ * ZADD key [NX | XX] [CH] [INCR] score member [score member...]
+ * 新版redis已有更多选项
+ * 默认返回 新增+更新 数量*/
 #define ZADD_NONE 0
-#define ZADD_INCR (1<<0)    /* Increment the score instead of setting it. */
-#define ZADD_NX (1<<1)      /* Don't touch elements not already existing. 注释错了吧？把already前的not去掉 */
-#define ZADD_XX (1<<2)      /* Only touch elements already exisitng. */
-#define ZADD_CH (1<<3)      /* Return num of elements added or updated. */
+#define ZADD_INCR (1<<0)    /* Increment the score instead of setting it. 增加分数，而不是覆盖 */
+#define ZADD_NX (1<<1)      /* Don't touch elements not already existing. 只能新增，不能修改。注释错了吧？把already前的not去掉 */
+#define ZADD_XX (1<<2)      /* Only touch elements already exisitng. 仅修改已存在的key */
+#define ZADD_CH (1<<3)      /* Return num of elements added or updated. 修改redis默认返回值的选项 */
 void zaddGenericCommand(client *c, int flags) {
     static char *nanerr = "resulting score is not a number (NaN)";
     robj *key = c->argv[1];
@@ -1225,7 +1231,7 @@ void zaddGenericCommand(client *c, int flags) {
     robj *curobj;
     double score = 0, *scores = NULL, curscore = 0.0;
     int j, elements;
-    int scoreidx = 0;
+    int scoreidx = 0;   // 记录第一个score值在命令中的索引
     /* The following vars are used in order to track what the command actually
      * did during the execution, to reply to the client and to trigger the
      * notification of keyspace change. */
@@ -1235,7 +1241,8 @@ void zaddGenericCommand(client *c, int flags) {
                            options like XX. */
 
     /* Parse options. At the end 'scoreidx' is set to the argument position
-     * of the score of the first score-element pair. */
+     * of the score of the first score-element pair.
+     * 解析 nx, xx, ch, incr 选项 */
     scoreidx = 2;
     while(scoreidx < c->argc) {
         char *opt = c->argv[scoreidx]->ptr;
@@ -1255,12 +1262,13 @@ void zaddGenericCommand(client *c, int flags) {
 
     /* After the options, we expect to have an even number of args, since
      * we expect any number of score-element pairs. */
+    // 选项之后的参数数量。 正常来说应该是多组 score member
     elements = c->argc-scoreidx;
     if (elements % 2 || !elements) {
         addReply(c,shared.syntaxerr);
         return;
     }
-    elements /= 2; /* Now this holds the number of score-element pairs. */
+    elements /= 2; /* 有多少对score-member。Now this holds the number of score-element pairs. */
 
     /* Check for incompatible options. */
     if (nx && xx) {
@@ -1277,23 +1285,29 @@ void zaddGenericCommand(client *c, int flags) {
 
     /* Start parsing all the scores, we need to emit any syntax error
      * before executing additions to the sorted set, as the command should
-     * either execute fully or nothing at all. */
+     * either execute fully or nothing at all.
+     * 解析score */
     scores = zmalloc(sizeof(double)*elements);
     for (j = 0; j < elements; j++) {
         if (getDoubleFromObjectOrReply(c,c->argv[scoreidx+j*2],&scores[j],NULL)
             != C_OK) goto cleanup;
     }
 
+    // ####### 上面基本上都是参数解析 ###################
+
     /* Lookup the key and create the sorted set if does not exist. */
-    zobj = lookupKeyWrite(c->db,key);
-    if (zobj == NULL) {
+    zobj = lookupKeyWrite(c->db,key);   // 得到对应的zset对象
+    if (zobj == NULL) {  // zset不存在
+        // xx选项，直接返回
         if (xx) goto reply_to_client; /* No key + XX option: nothing to do. */
+        // 判断用skiplist还是ziplist
+        // 可以看到，即便有多个member，只会根据添加的第一个member的长度来判断
         if (server.zset_max_ziplist_entries == 0 ||
             server.zset_max_ziplist_value < sdslen(c->argv[scoreidx+1]->ptr))
         {
-            zobj = createZsetObject();
+            zobj = createZsetObject();  // skiplist结构
         } else {
-            zobj = createZsetZiplistObject();
+            zobj = createZsetZiplistObject();    // ziplist结构
         }
         dbAdd(c->db,key,zobj);
     } else {
@@ -1310,7 +1324,7 @@ void zaddGenericCommand(client *c, int flags) {
             unsigned char *eptr;
 
             /* Prefer non-encoded element when dealing with ziplists. */
-            ele = c->argv[scoreidx+1+j*2];
+            ele = c->argv[scoreidx+1+j*2];  // member
             if ((eptr = zzlFind(zobj->ptr,ele,&curscore)) != NULL) {
                 if (nx) continue;
                 if (incr) {
@@ -1346,14 +1360,16 @@ void zaddGenericCommand(client *c, int flags) {
             zskiplistNode *znode;
             dictEntry *de;
 
+            // ele: member
             ele = c->argv[scoreidx+1+j*2] =
                 tryObjectEncoding(c->argv[scoreidx+1+j*2]);
-            de = dictFind(zs->dict,ele);
+            de = dictFind(zs->dict,ele);    // 在hash表中的entry
             if (de != NULL) {
                 if (nx) continue;
                 curobj = dictGetKey(de);
-                curscore = *(double*)dictGetVal(de);
+                curscore = *(double*)dictGetVal(de);  // 当前score
 
+                // 如果有incr选项
                 if (incr) {
                     score += curscore;
                     if (isnan(score)) {
@@ -1377,9 +1393,9 @@ void zaddGenericCommand(client *c, int flags) {
                     updated++;
                 }
                 processed++;
-            } else if (!xx) {
-                znode = zslInsert(zs->zsl,score,ele);
-                incrRefCount(ele); /* Inserted in skiplist. */
+            } else if (!xx) {   // 不存在且不是xx选项
+                znode = zslInsert(zs->zsl,score,ele);   // 插入到跳表
+                incrRefCount(ele); /* 引用计数. Inserted in skiplist. */
                 serverAssertWithInfo(c,NULL,dictAdd(zs->dict,ele,&znode->score) == DICT_OK);
                 incrRefCount(ele); /* Added to dictionary. */
                 server.dirty++;
@@ -1398,6 +1414,7 @@ reply_to_client:
         else
             addReply(c,shared.nullbulk);
     } else { /* ZADD. */
+        // 返回添加的和实际被更新的
         addReplyLongLong(c,ch ? added+updated : added);
     }
 
@@ -1418,6 +1435,7 @@ void zincrbyCommand(client *c) {
     zaddGenericCommand(c,ZADD_INCR);
 }
 
+// ZREM key member [member ...]
 void zremCommand(client *c) {
     robj *key = c->argv[1];
     robj *zobj;
@@ -1445,17 +1463,21 @@ void zremCommand(client *c) {
         dictEntry *de;
         double score;
 
+        // 遍历member（第0个是命令，第1个是key）
         for (j = 2; j < c->argc; j++) {
             de = dictFind(zs->dict,c->argv[j]);
             if (de != NULL) {
                 deleted++;
 
-                /* Delete from the skiplist */
+                /* Delete from the skiplist
+                 * 先从hash表查出score，再根据score去跳表中删除 */
                 score = *(double*)dictGetVal(de);
                 serverAssertWithInfo(c,c->argv[j],zslDelete(zs->zsl,score,c->argv[j]));
 
-                /* Delete from the hash table */
+                /* Delete from the hash table
+                 * 删除hash表项 */
                 dictDelete(zs->dict,c->argv[j]);
+                // hash表尝试缩容
                 if (htNeedsResize(zs->dict)) dictResize(zs->dict);
                 if (dictSize(zs->dict) == 0) {
                     dbDelete(c->db,key);
