@@ -484,7 +484,7 @@ void sentinelIsRunning(void) {
         serverLog(LL_WARNING,
             "Sentinel started without a config file. Exiting...");
         exit(1);
-    } else if (access(server.configfile,W_OK) == -1) {
+    } else if (access(server.configfile,W_OK) == -1) {  // 检查是否有写入权限
         serverLog(LL_WARNING,
             "Sentinel config file %s is not writable: %s. Exiting...",
             server.configfile,strerror(errno));

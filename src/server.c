@@ -4000,7 +4000,7 @@ int main(int argc, char **argv) {
     srand(time(NULL)^getpid());  // 设置随机数种子
     gettimeofday(&tv,NULL);
     dictSetHashFunctionSeed(tv.tv_sec^tv.tv_usec^getpid());   // 设置hash函数种子
-    server.sentinel_mode = checkForSentinelMode(argc,argv);   // 检查是否位哨兵模式
+    server.sentinel_mode = checkForSentinelMode(argc,argv);   // 这个实例是不是哨兵
     initServerConfig();     // 初始化服务器配置(默认值)
 
     /* Store the executable path and arguments in a safe place in order
@@ -4018,6 +4018,8 @@ int main(int argc, char **argv) {
         initSentinelConfig();
         initSentinel();     // 初始化哨兵对象
     }
+
+    // ################ 参数解析 #######################
 
     /* Check if we need to start in redis-check-rdb mode. We just execute
      * the program main. However the program is part of the Redis executable
@@ -4113,7 +4115,7 @@ int main(int argc, char **argv) {
     #ifdef __linux__
         linuxMemoryWarnings();
     #endif
-        loadDataFromDisk();
+        loadDataFromDisk();  // 加载rdb or aof
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {
                 serverLog(LL_WARNING,
@@ -4122,22 +4124,23 @@ int main(int argc, char **argv) {
                 exit(1);
             }
         }
-        if (server.ipfd_count > 0)
+        if (server.ipfd_count > 0)  // tcp socket fd count
             serverLog(LL_NOTICE,"The server is now ready to accept connections on port %d", server.port);
-        if (server.sofd > 0)
+        if (server.sofd > 0)    // unix socket fd count
             serverLog(LL_NOTICE,"The server is now ready to accept connections at %s", server.unixsocket);
     } else {
         sentinelIsRunning();
     }
 
-    /* Warning the user about suspicious maxmemory setting. */
-    if (server.maxmemory > 0 && server.maxmemory < 1024*1024) {
+    /* Warning the user about suspicious(可疑的) maxmemory setting.
+     * maxmemory设置值过小 提醒 */
+    if (server.maxmemory > 0 && server.maxmemory/*byte*/ < 1024*1024) {
         serverLog(LL_WARNING,"WARNING: You specified a maxmemory value that is less than 1MB (current value is %llu bytes). Are you sure this is what you really want?", server.maxmemory);
     }
 
-    aeSetBeforeSleepProc(server.el,beforeSleep);
-    aeMain(server.el);
-    aeDeleteEventLoop(server.el);
+    aeSetBeforeSleepProc(server.el,beforeSleep);    // 设置beforeSleep函数
+    aeMain(server.el);  // eventloop主循环
+    aeDeleteEventLoop(server.el);   // 清除eventloop
     return 0;
 }
 
