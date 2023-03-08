@@ -3680,6 +3680,7 @@ void createPidFile(void) {
     }
 }
 
+/* fork子进程，退出父进程。标准输出重定向到/dev/null里吐。这就是后台进程。 */
 void daemonize(void) {
     int fd;
 
@@ -3690,7 +3691,7 @@ void daemonize(void) {
      * the 'logfile' is set to 'stdout' in the configuration file
      * it will not log at all. */
     if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
-        dup2(fd, STDIN_FILENO);
+        dup2(fd, STDIN_FILENO);  // dup2: 复制文件描述符。把/dev/null的文件描述符复制给标准输出（这就是重定向的实现原理）
         dup2(fd, STDOUT_FILENO);
         dup2(fd, STDERR_FILENO);
         if (fd > STDERR_FILENO) close(fd);
@@ -3993,17 +3994,18 @@ int main(int argc, char **argv) {
 #ifdef INIT_SETPROCTITLE_REPLACEMENT
     spt_init(argc, argv);
 #endif
-    setlocale(LC_COLLATE,"");
-    zmalloc_enable_thread_safeness();
-    zmalloc_set_oom_handler(redisOutOfMemoryHandler);
-    srand(time(NULL)^getpid());
+    setlocale(LC_COLLATE,"");   // 指定字符排序规则
+    zmalloc_enable_thread_safeness();   // 启用zmolloc的线程安全模式
+    zmalloc_set_oom_handler(redisOutOfMemoryHandler);   // 设置zmalloc内存溢出处理函数
+    srand(time(NULL)^getpid());  // 设置随机数种子
     gettimeofday(&tv,NULL);
-    dictSetHashFunctionSeed(tv.tv_sec^tv.tv_usec^getpid());
-    server.sentinel_mode = checkForSentinelMode(argc,argv);
-    initServerConfig();
+    dictSetHashFunctionSeed(tv.tv_sec^tv.tv_usec^getpid());   // 设置hash函数种子
+    server.sentinel_mode = checkForSentinelMode(argc,argv);   // 检查是否位哨兵模式
+    initServerConfig();     // 初始化服务器配置(默认值)
 
     /* Store the executable path and arguments in a safe place in order
-     * to be able to restart the server later. */
+     * to be able to restart the server later.
+     * 记录启动命令中指定的路径、参数。重启时能用上 */
     server.executable = getAbsolutePath(argv[0]);
     server.exec_argv = zmalloc(sizeof(char*)*(argc+1));
     server.exec_argv[argc] = NULL;
@@ -4014,7 +4016,7 @@ int main(int argc, char **argv) {
      * data structures with master nodes to monitor. */
     if (server.sentinel_mode) {
         initSentinelConfig();
-        initSentinel();
+        initSentinel();     // 初始化哨兵对象
     }
 
     /* Check if we need to start in redis-check-rdb mode. We just execute
@@ -4030,9 +4032,9 @@ int main(int argc, char **argv) {
 
         /* Handle special options --help and --version */
         if (strcmp(argv[1], "-v") == 0 ||
-            strcmp(argv[1], "--version") == 0) version();
+            strcmp(argv[1], "--version") == 0) version();   // 输出version
         if (strcmp(argv[1], "--help") == 0 ||
-            strcmp(argv[1], "-h") == 0) usage();
+            strcmp(argv[1], "-h") == 0) usage();    // 帮助
         if (strcmp(argv[1], "--test-memory") == 0) {
             if (argc == 3) {
                 memtest(atoi(argv[2]),50);
@@ -4044,7 +4046,8 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* First argument is the config file name? */
+        /* First argument is the config file name?
+         * 配置文件 */
         if (argv[j][0] != '-' || argv[j][1] != '-') {
             configfile = argv[j];
             server.configfile = getAbsolutePath(configfile);
@@ -4060,6 +4063,7 @@ int main(int argc, char **argv) {
          * string "port 6380\n" to be parsed after the actual file name
          * is parsed, if any. */
         while(j != argc) {
+            // --开头的
             if (argv[j][0] == '-' && argv[j][1] == '-') {
                 /* Option name */
                 if (!strcmp(argv[j], "--check-rdb")) {
@@ -4085,21 +4089,23 @@ int main(int argc, char **argv) {
             exit(1);
         }
         resetServerSaveParams();
-        loadServerConfig(configfile,options);
+        loadServerConfig(configfile,options);   // 加载配置文件
         sdsfree(options);
     } else {
         serverLog(LL_WARNING, "Warning: no config file specified, using the default config. In order to specify a config file use %s /path/to/%s.conf", argv[0], server.sentinel_mode ? "sentinel" : "redis");
     }
 
-    server.supervised = redisIsSupervised(server.supervised_mode);
-    int background = server.daemonize && !server.supervised;
-    if (background) daemonize();
+    //  ########## 上面都是参数解析 #############
 
-    initServer();
-    if (background || server.pidfile) createPidFile();
+    server.supervised = redisIsSupervised(server.supervised_mode);  // 守护进程模式
+    int background = server.daemonize && !server.supervised;    // 后台进程模式
+    if (background) daemonize();    // 改变为后台进程（fork子进程来实现）
+
+    initServer();   // 初始化redisserver对象
+    if (background || server.pidfile) createPidFile();  // pidfile，防止进程启动多个副本。同时方便其他进程通过读取该文件得到该进程的id
     redisSetProcTitle(argv[0]);
-    redisAsciiArt();
-    checkTcpBacklogSettings();
+    redisAsciiArt();    // 打印redis启动图案（见asciilogo.h）
+    checkTcpBacklogSettings();  // 检查socket的backlog参数
 
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
