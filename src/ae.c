@@ -132,6 +132,15 @@ void aeStop(aeEventLoop *eventLoop) {
     eventLoop->stop = 1;
 }
 
+/**
+ * 创建文件事件
+ * @param eventLoop
+ * @param fd 文件描述符
+ * @param mask 关注事件掩码
+ * @param proc 事件处理器
+ * @param clientData
+ * @return
+ */
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         aeFileProc *proc, void *clientData)
 {
@@ -141,12 +150,16 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
     }
     aeFileEvent *fe = &eventLoop->events[fd];
 
+    // 注册到fd_set
     if (aeApiAddEvent(eventLoop, fd, mask) == -1)
         return AE_ERR;
+
+    // 初始化aeFileEvent
     fe->mask |= mask;
     if (mask & AE_READABLE) fe->rfileProc = proc;
     if (mask & AE_WRITABLE) fe->wfileProc = proc;
     fe->clientData = clientData;
+    // 更新maxfd
     if (fd > eventLoop->maxfd)
         eventLoop->maxfd = fd;
     return AE_OK;
@@ -204,6 +217,15 @@ static void aeAddMillisecondsToNow(long long milliseconds, long *sec, long *ms) 
     *ms = when_ms;
 }
 
+/**
+ * 创建时间事件
+ * @param eventLoop
+ * @param milliseconds 过多久执行
+ * @param proc  事件处理函数
+ * @param clientData
+ * @param finalizerProc  时间事件析构函数
+ * @return
+ */
 long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
         aeTimeProc *proc, void *clientData,
         aeEventFinalizerProc *finalizerProc)
@@ -213,11 +235,13 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
 
     te = zmalloc(sizeof(*te));
     if (te == NULL) return AE_ERR;
+    // 初始化aeTimeEvent对象
     te->id = id;
     aeAddMillisecondsToNow(milliseconds,&te->when_sec,&te->when_ms);
     te->timeProc = proc;
     te->finalizerProc = finalizerProc;
     te->clientData = clientData;
+    // 头插法啊
     te->next = eventLoop->timeEventHead;
     eventLoop->timeEventHead = te;
     return id;
@@ -246,6 +270,8 @@ int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)
  * 1) Insert the event in order, so that the nearest is just the head.
  *    Much better but still insertion or deletion of timers is O(N).
  * 2) Use a skiplist to have this operation as O(1) and insertion as O(log(N)).
+ *
+ * 找到最近的时间事件。O(n)复杂度。（因为就是个普通链表，并不是优先队列）
  */
 static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
 {
@@ -262,7 +288,8 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
     return nearest;
 }
 
-/* Process time events */
+/* Process time events
+ * 处理time event */
 static int processTimeEvents(aeEventLoop *eventLoop) {
     int processed = 0;
     aeTimeEvent *te, *prev;
@@ -289,12 +316,14 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
     prev = NULL;
     te = eventLoop->timeEventHead;
     maxId = eventLoop->timeEventNextId-1;
+    // 遍历时间事件链表
     while(te) {
         long now_sec, now_ms;
         long long id;
 
-        /* Remove events scheduled for deletion. */
-        if (te->id == AE_DELETED_EVENT_ID) {
+        /* Remove events scheduled for deletion.
+         * 删除被标记删除的事件*/
+        if (te->id == AE_DELETED_EVENT_ID /* -1 */) {
             aeTimeEvent *next = te->next;
             if (prev == NULL)
                 eventLoop->timeEventHead = te->next;
@@ -311,21 +340,28 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
          * this iteration. Note that this check is currently useless: we always
          * add new timers on the head, however if we change the implementation
          * detail, this check may be useful again: we keep it here for future
-         * defense. */
+         * defense.
+         * 如果 id > maxId，说明处理的时间事件是新添加的，maxId 是在遍历前赋值的
+         * 新加的时间事件是处理时间事件时添加的，此时遇到这种事件就进行跳过
+         * 不过这个代码目前是 dead code，因为新时间事件是头插的，此时遍历是遍历不到
+         * 作者的意思，是怕以后修改了这个实现，一种防卫手段 */
         if (te->id > maxId) {
             te = te->next;
             continue;
         }
         aeGetTime(&now_sec, &now_ms);
+        // 到时间了
         if (now_sec > te->when_sec ||
             (now_sec == te->when_sec && now_ms >= te->when_ms))
         {
             int retval;
 
             id = te->id;
+            // 执行时间事件处理函数(例如serverCron)，并返回事件下次执行的时间间隔
             retval = te->timeProc(eventLoop, id, te->clientData);
             processed++;
             if (retval != AE_NOMORE) {
+                // 重新设置时间事件的下次执行时间
                 aeAddMillisecondsToNow(retval,&te->when_sec,&te->when_ms);
             } else {
                 te->id = AE_DELETED_EVENT_ID;
@@ -349,34 +385,42 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
  * if flags has AE_DONT_WAIT set the function returns ASAP until all
  * the events that's possible to process without to wait are processed.
  *
- * The function returns the number of events processed. */
+ * The function returns the number of events processed.
+ * 事件处理核心逻辑 */
 int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 {
     int processed = 0, numevents;
 
-    /* Nothing to do? return ASAP */
+    /* Nothing to do? return ASAP
+     * 如果时间事件和文件事件都不用处理 */
     if (!(flags & AE_TIME_EVENTS) && !(flags & AE_FILE_EVENTS)) return 0;
 
     /* Note that we want call select() even if there are no
      * file events to process as long as we want to process time
      * events, in order to sleep until the next time event is ready
-     * to fire. */
+     * to fire.
+     * 因为多路复用可以一直阻塞直到文件事件发生，但是我们还需要处理时间事件。
+     * 所以需要扫描timeEvent链表，找出最近的timeEvent，算出最大可阻塞时间。
+     * 然后设置select/epoll的超时参数 */
     if (eventLoop->maxfd != -1 ||
         ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {
         int j;
         aeTimeEvent *shortest = NULL;
         struct timeval tv, *tvp;
 
+        // 需要处理timeEvent
         if (flags & AE_TIME_EVENTS && !(flags & AE_DONT_WAIT))
+            // 找到最近的time event。
             shortest = aeSearchNearestTimer(eventLoop);
         if (shortest) {
             long now_sec, now_ms;
-
+            // 获取当前时间
             aeGetTime(&now_sec, &now_ms);
             tvp = &tv;
 
             /* How many milliseconds we need to wait for the next
-             * time event to fire? */
+             * time event to fire?
+             * 计算距离最近time event还有多久。(即最大可阻塞时间) */
             long long ms =
                 (shortest->when_sec - now_sec)*1000 +
                 shortest->when_ms - now_ms;
@@ -401,7 +445,9 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
         }
 
+        // select
         numevents = aeApiPoll(eventLoop, tvp);
+        // 处理文件事件
         for (j = 0; j < numevents; j++) {
             aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
             int mask = eventLoop->fired[j].mask;
@@ -452,7 +498,8 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             processed++;
         }
     }
-    /* Check time events */
+    /* Check time events
+     * 执行时间事件*/
     if (flags & AE_TIME_EVENTS)
         processed += processTimeEvents(eventLoop);
 
@@ -486,6 +533,7 @@ void aeMain(aeEventLoop *eventLoop) {
     while (!eventLoop->stop) {
         if (eventLoop->beforesleep != NULL)
             eventLoop->beforesleep(eventLoop);
+        // poll
         aeProcessEvents(eventLoop, AE_ALL_EVENTS);
     }
 }

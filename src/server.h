@@ -862,12 +862,12 @@ struct redisServer {
     /* Replication (master) */
     int slaveseldb;                 /* Last SELECTed DB in replication output */
     long long master_repl_offset;   /* Global replication offset */
-    int repl_ping_slave_period;     /* Master pings the slave every N seconds */
-    char *repl_backlog;             /* Replication backlog for partial syncs */
-    long long repl_backlog_size;    /* Backlog circular buffer size */
-    long long repl_backlog_histlen; /* Backlog actual data length */
-    long long repl_backlog_idx;     /* Backlog circular buffer current offset */
-    long long repl_backlog_off;     /* Replication offset of first byte in the
+    int repl_ping_slave_period;     /* 主节点发给从节点的心跳周期，Master pings the slave every N seconds */
+    char *repl_backlog;             /* 复制缓冲区，环形数据结构。Replication backlog for partial syncs */
+    long long repl_backlog_size;    /* 复制缓冲区大小，默认1MB，Backlog circular buffer size */
+    long long repl_backlog_histlen; /* 复制缓冲区数据长度，Backlog actual data length */
+    long long repl_backlog_idx;     /* 复制缓冲区末尾索引(即新数据的写入位置)，Backlog circular buffer current offset */
+    long long repl_backlog_off;     /* 复制缓冲区中第一个字节的偏移量，Replication offset of first byte in the
                                        backlog buffer. */
     time_t repl_backlog_time_limit; /* Time without slaves after the backlog
                                        gets released. */
@@ -875,7 +875,7 @@ struct redisServer {
                                        Only valid if server.slaves len is 0. */
     int repl_min_slaves_to_write;   /* Min number of slaves to write. */
     int repl_min_slaves_max_lag;    /* Max lag of <count> slaves to write. */
-    int repl_good_slaves_count;     /* Number of slaves with lag <= max_lag. */
+    int repl_good_slaves_count;     /* 有效从节点数量，Number of slaves with lag <= max_lag. */
     int repl_diskless_sync;         /* Send RDB to slaves sockets directly. */
     int repl_diskless_sync_delay;   /* Delay to start a diskless repl BGSAVE. */
     /* Replication (slave) */
@@ -894,15 +894,15 @@ struct redisServer {
     int repl_transfer_fd;    /* Slave -> Master SYNC temp file descriptor */
     char *repl_transfer_tmpfile; /* Slave-> master SYNC temp file name */
     time_t repl_transfer_lastio; /* Unix time of the latest read, for timeout */
-    int repl_serve_stale_data; /* Serve stale data when link is down? */
+    int repl_serve_stale_data; /* 主从断连后，从节点是否继续处理命令请求。Serve stale data when link is down? */
     int repl_slave_ro;          /* Slave is read only? */
     time_t repl_down_since; /* Unix time at which link with master went down */
     int repl_disable_tcp_nodelay;   /* Disable TCP_NODELAY after SYNC? */
     int slave_priority;             /* Reported in INFO and used by Sentinel. */
     int slave_announce_port;        /* Give the master this listening port. */
     char *slave_announce_ip;        /* Give the master this ip address. */
-    char repl_master_runid[CONFIG_RUN_ID_SIZE+1];  /* Master run id for PSYNC.*/
-    long long repl_master_initial_offset;         /* Master PSYNC offset. */
+    char repl_master_runid[CONFIG_RUN_ID_SIZE+1];  /* 主节点runid，Master run id for PSYNC.*/
+    long long repl_master_initial_offset;         /* 主节点写入offset，Master PSYNC offset. */
     /* Replication script cache. */
     dict *repl_scriptcache_dict;        /* SHA1 all slaves are aware of. */
     list *repl_scriptcache_fifo;        /* First in, first out LRU eviction. */
