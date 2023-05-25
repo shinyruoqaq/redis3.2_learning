@@ -1285,6 +1285,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Run the Redis Cluster cron. */
     run_with_period(100) {
+        // 集群模式
         if (server.cluster_enabled) clusterCron();
     }
 
@@ -2006,6 +2007,7 @@ void initServer(void) {
         server.maxmemory_policy = MAXMEMORY_NO_EVICTION;
     }
 
+    // 集群模式 初始化
     if (server.cluster_enabled) clusterInit();
     replicationScriptCacheInit();
     scriptingInit(1);
@@ -4116,7 +4118,7 @@ int main(int argc, char **argv) {
         linuxMemoryWarnings();
     #endif
         loadDataFromDisk();  // 加载rdb or aof
-        if (server.cluster_enabled) {
+        if (server.cluster_enabled) {   // 集群模式
             if (verifyClusterConfigWithData() == C_ERR) {
                 serverLog(LL_WARNING,
                     "You can't have keys in a DB different than DB 0 when in "

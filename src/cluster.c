@@ -461,6 +461,7 @@ void clusterInit(void) {
         int j;
 
         for (j = 0; j < server.cfd_count; j++) {
+            // 注册 节点连接的回调函数
             if (aeCreateFileEvent(server.el, server.cfd[j], AE_READABLE,
                 clusterAcceptHandler, NULL) == AE_ERR)
                     serverPanic("Unrecoverable error creating Redis Cluster "
@@ -606,6 +607,7 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
          * node identity. */
         link = createClusterLink(NULL);
         link->fd = cfd;
+        // 注册 节点读事件的回调函数
         aeCreateFileEvent(server.el,cfd,AE_READABLE,clusterReadHandler,link);
     }
 }
@@ -619,7 +621,8 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
  *
  * However if the key contains the {...} pattern, only the part between
  * { and } is hashed. This may be useful in the future to force certain
- * keys to be in the same node (assuming no resharding is in progress). */
+ * keys to be in the same node (assuming no resharding is in progress).
+ * 计算slot索引 */
 unsigned int keyHashSlot(char *key, int keylen) {
     int s, e; /* start-end indexes of { and } */
 
@@ -637,7 +640,8 @@ unsigned int keyHashSlot(char *key, int keylen) {
     if (e == keylen || e == s+1) return crc16(key,keylen) & 0x3FFF;
 
     /* If we are here there is both a { and a } on its right. Hash
-     * what is in the middle between { and }. */
+     * what is in the middle between { and }.
+     * 对{}中的内容hash取模 */
     return crc16(key+s+1,e-s-1) & 0x3FFF;
 }
 
