@@ -1097,6 +1097,8 @@ void updateCachedTime(void) {
  * Everything directly called here will be called server.hz times per second,
  * so in order to throttle execution of things we want to do less frequently
  * a macro is used: run_with_period(milliseconds) { .... }
+ *
+ * @return 返回下次过多久执行
  */
 
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
@@ -1280,7 +1282,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     clientsArePaused(); /* Don't check return value, just use the side effect. */
 
     /* Replication cron function -- used to reconnect to master,
-     * detect transfer failures, start background RDB transfers and so forth. */
+     * detect transfer failures, start background RDB transfers and so forth.
+     * 主从复制 */
     run_with_period(1000) replicationCron();
 
     /* Run the Redis Cluster cron. */
@@ -1967,7 +1970,8 @@ void initServer(void) {
     updateCachedTime();
 
     /* Create the serverCron() time event, that's our main way to process
-     * background operations. */
+     * background operations.
+     * 创建serverCron时间事件 */
     if(aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create the serverCron time event.");
         exit(1);

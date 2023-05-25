@@ -1724,6 +1724,7 @@ int cancelReplicationHandshake(void) {
 }
 
 /* Set replication to the specified master address and port. */
+// 设置主节点信息
 void replicationSetMaster(char *ip, int port) {
     sdsfree(server.masterhost);
     server.masterhost = sdsnew(ip);
@@ -1773,7 +1774,8 @@ void replicationHandleMasterDisconnection(void) {
 
 void slaveofCommand(client *c) {
     /* SLAVEOF is not allowed in cluster mode as replication is automatically
-     * configured using the current address of the master node. */
+     * configured using the current address of the master node.
+     * 不能用于集群模式*/
     if (server.cluster_enabled) {
         addReplyError(c,"SLAVEOF not allowed in cluster mode.");
         return;
@@ -1781,6 +1783,7 @@ void slaveofCommand(client *c) {
 
     /* The special host/port combination "NO" "ONE" turns the instance
      * into a master. Otherwise the new master address is set. */
+    // slaveof no one，设为主节点，取消复制
     if (!strcasecmp(c->argv[1]->ptr,"no") &&
         !strcasecmp(c->argv[2]->ptr,"one")) {
         if (server.masterhost) {
@@ -1813,6 +1816,7 @@ void slaveofCommand(client *c) {
         }
         /* There was no previous master or the user specified a different one,
          * we can continue. */
+        // 记录主节点信息
         replicationSetMaster(c->argv[1]->ptr, port);
         sds client = catClientInfoString(sdsempty(),c);
         serverLog(LL_NOTICE,"SLAVE OF %s:%d enabled (user request from '%s')",
