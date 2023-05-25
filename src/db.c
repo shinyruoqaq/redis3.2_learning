@@ -56,6 +56,7 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
             server.aof_child_pid == -1 &&
             !(flags & LOOKUP_NOTOUCH))
         {
+            // 更新访问时间
             val->lru = LRU_CLOCK();
         }
         return val;

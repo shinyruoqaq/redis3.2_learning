@@ -1132,7 +1132,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * not likely.
      *
      * Note that you can change the resolution altering the
-     * LRU_CLOCK_RESOLUTION define. */
+     * LRU_CLOCK_RESOLUTION define.
+     * 更新全局lru时钟 */
     server.lruclock = getLRUClock();
 
     /* Record the max memory used since the server was started. */
@@ -2434,7 +2435,8 @@ int processCommand(client *c) {
      *
      * First we try to free some memory if possible (if there are volatile
      * keys in the dataset). If there are not the only thing we can do
-     * is returning an error. */
+     * is returning an error.
+     * 尝试进行内存淘汰 */
     if (server.maxmemory) {
         int retval = freeMemoryIfNeeded();
         /* freeMemoryIfNeeded may flush slave output buffers. This may result
@@ -3518,6 +3520,7 @@ int freeMemoryIfNeeded(void) {
     mem_tofree = mem_used - server.maxmemory;
     mem_freed = 0;
     latencyStartMonitor(latency);
+    // 循环直到释放足够空间
     while (mem_freed < mem_tofree) {
         int j, k, keys_freed = 0;
 
@@ -3528,6 +3531,7 @@ int freeMemoryIfNeeded(void) {
             redisDb *db = server.db+j;
             dict *dict;
 
+            // 根据策略设置从哪个dict淘汰
             if (server.maxmemory_policy == MAXMEMORY_ALLKEYS_LRU ||
                 server.maxmemory_policy == MAXMEMORY_ALLKEYS_RANDOM)
             {

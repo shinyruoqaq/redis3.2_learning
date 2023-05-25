@@ -463,7 +463,7 @@ typedef long long mstime_t; /* millisecond time type. */
 typedef struct redisObject {
     unsigned type:4;
     unsigned encoding:4;
-    unsigned lru:LRU_BITS; /* lru time (relative to server.lruclock) */
+    unsigned lru:LRU_BITS; /* 对象被访问的计时。用于实现lru淘汰。lru time (relative to server.lruclock) */
     int refcount;
     void *ptr;
 } robj;
@@ -491,7 +491,8 @@ typedef struct redisObject {
  * Entries inside the eviciton pool are taken ordered by idle time, putting
  * greater idle times to the right (ascending order).
  *
- * Empty entries have the key pointer set to NULL. */
+ * Empty entries have the key pointer set to NULL.
+ * 驱逐池中的元素 */
 #define MAXMEMORY_EVICTION_POOL_SIZE 16
 struct evictionPoolEntry {
     unsigned long long idle;    /* Object idle time. */
