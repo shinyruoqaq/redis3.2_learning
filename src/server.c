@@ -2021,8 +2021,11 @@ void initServer(void) {
     bioInit();
 }
 
-/* Populates the Redis Command Table starting from the hard coded list
- * we have on top of redis.c file. */
+/*
+ * Populates the Redis Command Table starting from the hard coded list
+ * we have on top of redis.c file.
+ * 初始化命令表。redisServer.commands, redisServer.orig_commands
+ */
 void populateCommandTable(void) {
     int j;
     int numcommands = sizeof(redisCommandTable)/sizeof(struct redisCommand);
@@ -2951,7 +2954,7 @@ sds genRedisInfoString(char *section) {
             "client_longest_output_list:%lu\r\n"
             "client_biggest_input_buf:%lu\r\n"
             "blocked_clients:%d\r\n",
-            listLength(server.clients)-listLength(server.slaves),
+            listLength(server.clients)-listLength(server.slaves),   // connected_clients信息是除去了slave的
             lol, bib,
             server.bpop_blocked_clients);
     }

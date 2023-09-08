@@ -242,8 +242,12 @@ int dictExpand(dict *d, unsigned long size)
  * since part of the hash table may be composed of empty spaces, it is not
  * guaranteed that this function will rehash even a single bucket, since it
  * will visit at max N*10 empty buckets in total, otherwise the amount of
- * work it does would be unbound and the function may block for a long time. */
+ * work it does would be unbound and the function may block for a long time.
+ *
+ * rehash实现，从ht[0]迁移n个桶到ht[1]
+ */
 int dictRehash(dict *d, int n/*搬n个bucket*/) {
+    // 最大访问空桶数。
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
     if (!dictIsRehashing(d)) return 0;
 
@@ -253,11 +257,13 @@ int dictRehash(dict *d, int n/*搬n个bucket*/) {
         /* Note that rehashidx can't overflow as we are sure there are more
          * elements because ht[0].used != 0 */
         assert(d->ht[0].size > (unsigned long)d->rehashidx);
+        // 从当前的rehashidx开始找到一个不空的桶
         while(d->ht[0].table[d->rehashidx] == NULL) {
             d->rehashidx++;
-            /* 连续访问了n*10个空的bucket，直接退出 */
+            /* 总共访问了n*10个空的bucket，直接退出 */
             if (--empty_visits == 0) return 1;
         }
+        // 找到非空桶了
         de = d->ht[0].table[d->rehashidx];
         /* Move all the keys in this bucket from the old to the new hash HT */
         while(de) {
@@ -272,6 +278,7 @@ int dictRehash(dict *d, int n/*搬n个bucket*/) {
             d->ht[1].used++;
             de = nextde;
         }
+        // 这个桶搬完了，置空
         d->ht[0].table[d->rehashidx] = NULL;
         d->rehashidx++;
     }

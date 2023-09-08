@@ -56,6 +56,9 @@ typedef struct dictEntry {
     struct dictEntry *next;
 } dictEntry;
 
+/**
+ * 定义了字典中用于操作数据的函数指针
+ */
 typedef struct dictType {
     unsigned int (*hashFunction)(const void *key);
     /* key和value的拷贝函数。（源码里好像都是赋值为NULL。。） */
@@ -69,20 +72,26 @@ typedef struct dictType {
 } dictType;
 
 /* This is our hash table structure. Every dictionary has two of this as we
- * implement incremental rehashing, for the old to the new table. */
+ * implement incremental rehashing, for the old to the new table.
+ * hash表
+ */
 typedef struct dictht {
     dictEntry **table;    /* entry数组 */
     unsigned long size;   /* 数组长度 */
-    unsigned long sizemask;
+    unsigned long sizemask; /* 掩码，用来和hash值做&运算。其实就是size-1 */
     unsigned long used;   /* 元素个数 */
 } dictht;
 
+/**
+ * 字典。
+ * （由两个hash表实现）
+ */
 typedef struct dict {
-    dictType *type; /* 存储一些元数据: 如hash函数 */
-    void *privdata;
+    dictType *type; /* dictType结构体中包含一些常用函数指针 */
+    void *privdata; /* 应该没什么用，在7.0被移除 */
     dictht ht[2];   /* 两个hash表，一个用于增量式重hash。正常情况仅用h[0] */
-    long rehashidx; /* rehashing not in progress if rehashidx == -1 */
-    int iterators; /* number of iterators currently running */
+    long rehashidx; /* 记录rehash的进度, 起始就是rehash进行到了哪个桶。rehashing not in progress if rehashidx == -1 */
+    int iterators; /* 正在运行的安全迭代器数量。number of iterators currently running */
 } dict;
 
 /* If safe is set to 1 this is a safe iterator, that means, you can call

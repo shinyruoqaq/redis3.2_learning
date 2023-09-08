@@ -227,7 +227,9 @@ robj *dbRandomKey(redisDb *db) {
 int dbDelete(redisDb *db, robj *key) {
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
+    // 先从过期字典删除
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
+    // 再从键空间中删除
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
         if (server.cluster_enabled) slotToKeyDel(key);
         return 1;
@@ -259,12 +261,14 @@ int dbDelete(redisDb *db, robj *key) {
  * o = lookupKeyWrite(db,key);
  * if (checkType(c,o,OBJ_STRING)) return;
  * o = dbUnshareStringValue(db,key,o);
- *
+ *```           ```````````````
  * At this point the caller is ready to modify the object, for example
  * using an sdscat() call to append some data, or anything else.
  */
 robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o) {
     serverAssert(o->type == OBJ_STRING);
+    // 如果该对象被共享(refcount>1) 或 不是raw格式（例如是embstr, int格式）
+    // 则将其转换成raw格式并覆盖原来的对象
     if (o->refcount != 1 || o->encoding != OBJ_ENCODING_RAW) {
         robj *decoded = getDecodedObject(o);
         o = createRawStringObject(decoded->ptr, sdslen(decoded->ptr));
@@ -894,10 +898,17 @@ void propagateExpire(redisDb *db, robj *key) {
     decrRefCount(argv[1]);
 }
 
+/**
+ * 尝试删除过期键
+ * @param db
+ * @param key
+ * @return 1:删除了 0:没过期 or 没有过期时间
+ */
 int expireIfNeeded(redisDb *db, robj *key) {
     mstime_t when = getExpire(db,key);
     mstime_t now;
 
+    // 没有设置过期时间
     if (when < 0) return 0; /* No expire for this key */
 
     /* Don't expire anything while loading. It will be done later. */
@@ -917,6 +928,8 @@ int expireIfNeeded(redisDb *db, robj *key) {
      * Still we try to return the right information to the caller,
      * that is, 0 if we think the key should be still valid, 1 if
      * we think the key is expired at this time. */
+    // 如果是slave, 直接返回
+    // slave中不会进行主动删除，真正的删除操作需要等master进行, 从而保证数据的同步
     if (server.masterhost != NULL) return now > when;
 
     /* Return when this key has not expired */
@@ -924,9 +937,12 @@ int expireIfNeeded(redisDb *db, robj *key) {
 
     /* Delete the key */
     server.stat_expiredkeys++;
+    // 向aof文件和附属节点传播过期信息
     propagateExpire(db,key);
+    // 发出过期事件通知
     notifyKeyspaceEvent(NOTIFY_EXPIRED,
         "expired",key,db->id);
+    // 执行删除操作
     return dbDelete(db,key);
 }
 

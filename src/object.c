@@ -56,9 +56,23 @@ robj *createRawStringObject(const char *ptr, size_t len) {
 
 /* Create a string object with encoding OBJ_ENCODING_EMBSTR, that is
  * an object where the sds string is actually an unmodifiable string
- * allocated in the same chunk as the object itself. */
-robj *createEmbeddedStringObject(const char *ptr, size_t len) {   // 创建embstr格式的robj对象
-    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);   // 16+3+len+1，由于len<=44，所以整体<=64
+ * allocated in the same chunk as the object itself.
+ * 创建embstr编码格式的robj对象
+ *                    embedded robj
+ *        - - - - - - - - - - - - - - - - - -
+ *        -     type. 4                     -
+ *        -     encoding. 4                 -
+ *        -     lru. 24                     -
+ *        -     refcount. 32                -
+ *        -     *ptr.32     -----------     -
+ *        -     sdshdr8.len           |     -
+ *        -     sdshdr8.aloc          |     -
+ *        -     sdshdr8.flags         |     -
+ *        -     sdshdr8.buf   <--------     -
+ *        - - - - - - - - - - - - - - - - - -
+ * */
+robj *createEmbeddedStringObject(const char *ptr, size_t len) {
+    robj *o = zmalloc(sizeof(robj)/*16*/+sizeof(struct sdshdr8)/*3*/+len+1);   // 16+3+len+1，由于len<=44，所以整体<=64
     struct sdshdr8 *sh = (void*)(o+1);  // o+1 = o + sizeof(robj)
 
     o->type = OBJ_STRING;
@@ -84,10 +98,13 @@ robj *createEmbeddedStringObject(const char *ptr, size_t len) {   // 创建embst
  * used.
  *
  * The current limit of 39 is chosen so that the biggest string object
- * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
+ * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc.
+ * 创建string类型的robj.
+ * (小于等于44字节采用embstr编码格式)
+ */
 #define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44
 robj *createStringObject(const char *ptr, size_t len) {
-    if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT)
+    if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT/*44*/)
         return createEmbeddedStringObject(ptr,len);
     else
         return createRawStringObject(ptr,len);
@@ -356,7 +373,7 @@ int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
 }
 
 /* Try to encode a string object in order to save space
- * 重新编码字符串对象，为了节省空间。 在这里就会做embstr的尝试*/
+ * 尝试转换成更节省内存的编码方式。 在这里就会做embstr的尝试*/
 robj *tryObjectEncoding(robj *o) {
     long value;
     sds s = o->ptr;
@@ -366,33 +383,41 @@ robj *tryObjectEncoding(robj *o) {
      * in this function. Other types use encoded memory efficient
      * representations but are handled by the commands implementing
      * the type. */
+    // 确保是string
     serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
 
     /* We try some specialized encoding only for objects that are
      * RAW or EMBSTR encoded, in other words objects that are still
      * in represented by an actually array of chars. */
+    // 既不是raw也不是embstr，则返回
     if (!sdsEncodedObject(o)) return o;
 
     /* It's not safe to encode shared objects: shared objects can be shared
      * everywhere in the "object space" of Redis and may end in places where
      * they are not handled. We handle them only as values in the keyspace. */
-     if (o->refcount > 1) return o;
+    // 对象被多处引用，不能贸然重新编码。（因为重新编码可能会改变robj对象指针）
+    if (o->refcount > 1) return o;
 
     /* Check if we can represent this string as a long integer.
      * Note that we are sure that a string larger than 20 chars is not
      * representable as a 32 nor 64 bit integer. */
     len = sdslen(s);
-    if (len <= 20 && string2l(s,len,&value)) {  // 尝试转long（如果是数字形式且在范围内）
+    // 1. 如果是数字，尝试直接用 long来存储。
+    // 尝试转long
+    // (只所以要<=20，是因为一个 long 能表示的范围是 -9223372036854775808 到 9223372036854775807，包含负号的话十进制表示最多需要20个字符)
+    if (len <= 20 && string2l(s,len,&value)) {
         /* This object is encodable as a long. Try to use a shared object.
          * Note that we avoid using shared integers when maxmemory is used
          * because every object needs to have a private LRU field for the LRU
-         * algorithm to work well. 如果开启了内存限制且启用了lru淘汰策略，则不使用共享对象。因为此时每个robj的lru字段是不同的*/
+         * algorithm to work well. */
+        // 如果开启了内存限制且启用了lru淘汰策略，则不使用共享对象。
+        // (因为共享池里的对象肯定是不能被淘汰的。假设极端情况，内存满了需要进行lru清楚，此时绝大部分键值恰好都是用的共享池里的对象，那么此时LRU将无法发挥作用)
         if ((server.maxmemory == 0 ||
              (server.maxmemory_policy != MAXMEMORY_VOLATILE_LRU &&
               server.maxmemory_policy != MAXMEMORY_ALLKEYS_LRU)) &&
             value >= 0 &&
-            value < OBJ_SHARED_INTEGERS)
-        {   // 使用共享对象
+            value < OBJ_SHARED_INTEGERS/*10000*/)
+        {   // 对[0-10000)的整数使用共享对象
             decrRefCount(o);
             incrRefCount(shared.integers[value]);
             return shared.integers[value];
@@ -408,6 +433,7 @@ robj *tryObjectEncoding(robj *o) {
      * try the EMBSTR encoding which is more efficient.
      * In this representation the object and the SDS string are allocated
      * in the same chunk of memory to save space and cache misses. */
+    // 2. 尝试使用embstr编码存储
     if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT) {  // 字符串长度小于44，转EMBSTR编码格式
         robj *emb;
 
@@ -426,6 +452,7 @@ robj *tryObjectEncoding(robj *o) {
      * We do that only for relatively large strings as this branch
      * is only entered if the length of the string is greater than
      * OBJ_ENCODING_EMBSTR_SIZE_LIMIT. */
+    // 3. 没办法只能用raw编码了
     if (o->encoding == OBJ_ENCODING_RAW &&
         sdsavail(s) > len/10)
     {

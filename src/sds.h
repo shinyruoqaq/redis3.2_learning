@@ -39,14 +39,28 @@
 #include <stdarg.h>
 #include <stdint.h>
 
+// 给 char * 类型定义了一个别名 sds
 typedef char *sds;
 
+/**
+ * sds的5种header。
+ * （由于只有5种，所以flags只需要3字节存储类型）
+ */
+
 /* Note: sdshdr5 is never used, we just access the flags byte directly.
- * However is here to document the layout of type 5 SDS strings. */
+ * However is here to document the layout of type 5 SDS strings.
+ * 其实有使用，只是说没有在更高层级暴露给用户，
+ * 例如现在 set foo bar，键和值的大小都是 3 字节，但 value 会是 sdshdr8 编码，key 因为不会变化其实会是 sdshdr5 编码，只是我们更多都关注 value.
+ *
+ * __attribute__ ((__packed__)): 告诉编译器不要字节对齐，而是紧凑地分配内存
+ * */
 struct __attribute__ ((__packed__)) sdshdr5 {
-    unsigned char flags; /* 3 lsb of type, and 5 msb of string length */
-    char buf[];
+    unsigned char flags; /* 低三位表示类型，高5位表示字符串长度。3 lsb of type, and 5 msb of string length. */
+    char buf[];     // 柔性数组：结构体中最后一个属性可以被定义为一个大小可变的数组（该属性前必须有其它属性）。使用 sizeof 函数计算包含柔性数组的结构体大小时，返回结构不包括柔性数组占用的内存
 };
+/**
+ * 以下的结构体中，flags的低三位均表示类型，其余5位未使用。
+ */
 struct __attribute__ ((__packed__)) sdshdr8 {
     uint8_t len; /* used */
     uint8_t alloc; /* excluding the header and null terminator */
@@ -83,6 +97,15 @@ struct __attribute__ ((__packed__)) sdshdr64 {
 #define SDS_HDR(T,s) ((struct sdshdr##T *)((s)-(sizeof(struct sdshdr##T))))
 #define SDS_TYPE_5_LEN(f) ((f)>>SDS_TYPE_BITS)
 
+/**
+ * O(1)获取字符串的长度
+ *
+ * 1. 根据s[-1]定位到flags
+ * 2. 根据flags确定header类型
+ * 3. 获取header的len字段
+ * @param s
+ * @return
+ */
 static inline size_t sdslen(const sds s) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {

@@ -61,6 +61,11 @@ int listMatchObjects(void *a, void *b) {
     return equalStringObjects(a,b);
 }
 
+/**
+ * 创建客户端对象
+ * @param fd  client socket
+ * @return
+ */
 client *createClient(int fd) {
     client *c = zmalloc(sizeof(client));
 
@@ -69,10 +74,14 @@ client *createClient(int fd) {
      * in the context of a client. When commands are executed in other
      * contexts (for instance a Lua script) we need a non connected client. */
     if (fd != -1) {
+        // socket设为非阻塞模式
         anetNonBlock(NULL,fd);
+        // 关闭tcp delay选项
         anetEnableTcpNoDelay(NULL,fd);
+        // 开启 TCP keepAlive 选项，服务器会定时向空闲客户端发送 ACK 探测，以关闭空闲或异常连接
         if (server.tcpkeepalive)
             anetKeepAlive(NULL,fd,server.tcpkeepalive);
+        // 为client socket注册监听 AE_READABLE 类型的文件事件，事件处理函数为 readQueryFromClient
         if (aeCreateFileEvent(server.el,fd,AE_READABLE,
             readQueryFromClient, c) == AE_ERR)
         {
@@ -82,7 +91,8 @@ client *createClient(int fd) {
         }
     }
 
-    selectDb(c,0);
+    // 初始化client的各个属性。
+    selectDb(c,0);  // 默认0号库
     c->id = server.next_client_id++;
     c->fd = fd;
     c->name = NULL;
@@ -125,8 +135,8 @@ client *createClient(int fd) {
     c->peerid = NULL;
     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
-    if (fd != -1) listAddNodeTail(server.clients,c);
-    initClientMultiState(c);
+    if (fd != -1) listAddNodeTail(server.clients,c); // 加入到server.clients链表中（fd != -1保证lua、aof这样的伪客户端不会被加进去）
+    initClientMultiState(c);  // 初始化client的事务上下文
     return c;
 }
 
@@ -612,9 +622,17 @@ int clientHasPendingReplies(client *c) {
     return c->bufpos || listLength(c->reply);
 }
 
+
 #define MAX_ACCEPTS_PER_CALL 1000
+/**
+ * accept客户端连接后的后续处理
+ * @param fd client socket
+ * @param flags
+ * @param ip client ip
+ */
 static void acceptCommonHandler(int fd, int flags, char *ip) {
     client *c;
+    // 1. 创建client对象
     if ((c = createClient(fd)) == NULL) {
         serverLog(LL_WARNING,
             "Error registering fd event for the new client: %s (fd=%d)",
@@ -625,7 +643,8 @@ static void acceptCommonHandler(int fd, int flags, char *ip) {
     /* If maxclient directive is set and this is one client more... close the
      * connection. Note that we create the client instead to check before
      * for this condition, since now the socket is already set in non-blocking
-     * mode and we can send an error for free using the Kernel I/O */
+     * mode and we can send an error for free using the Kernel I/O
+     * 2. 连接数检查 */
     if (listLength(server.clients) > server.maxclients) {
         char *err = "-ERR max number of clients reached\r\n";
 
@@ -641,11 +660,12 @@ static void acceptCommonHandler(int fd, int flags, char *ip) {
     /* If the server is running in protected mode (the default) and there
      * is no password set, nor a specific interface is bound, we don't accept
      * requests from non loopback interfaces. Instead we try to explain the
-     * user what to do to fix it if needed. */
+     * user what to do to fix it if needed.
+     * 3. 对保护模式的校验 */
     if (server.protected_mode &&
         server.bindaddr_count == 0 &&
         server.requirepass == NULL &&
-        !(flags & CLIENT_UNIX_SOCKET) &&
+        !(flags & CLIENT_UNIX_SOCKET/*1<<11*/) &&
         ip != NULL)
     {
         if (strcmp(ip,"127.0.0.1") && strcmp(ip,"::1")) {
@@ -683,14 +703,27 @@ static void acceptCommonHandler(int fd, int flags, char *ip) {
     c->flags |= flags;
 }
 
+/**
+ * 客户端连接处理器.
+ * 负责接收客户端的连接，创建数据交换socket，并为数据socket注册文件事件回调函数
+ * initServer()中注册
+ * @param el
+ * @param fd server socket
+ * @param privdata
+ * @param mask
+ */
 void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
-    int cport, cfd, max = MAX_ACCEPTS_PER_CALL;
-    char cip[NET_IP_STR_LEN];
+    int cport, cfd, max = MAX_ACCEPTS_PER_CALL/*1000*/;
+    char cip[NET_IP_STR_LEN/*46*/];
+    // UNUSED 是个空函数，没用到的变量用它调用下，用于消除编译警告的
     UNUSED(el);
     UNUSED(mask);
     UNUSED(privdata);
 
+    // 每次事件循环中最多处理1000个客户请求，防止短时间处理太多导致进程阻塞
     while(max--) {
+        // accept客户端连接，得到client socket
+        // 如果当前没有待处理的连接请求，则函数会返回 ANET_ERR，这时会退出函数
         cfd = anetTcpAccept(server.neterr, fd, cip, sizeof(cip), &cport);
         if (cfd == ANET_ERR) {
             if (errno != EWOULDBLOCK)
@@ -699,6 +732,7 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
         serverLog(LL_VERBOSE,"Accepted %s:%d", cip, cport);
+        // 后续处理，例如初始化client对象
         acceptCommonHandler(cfd,0,cip);
     }
 }
@@ -876,17 +910,27 @@ void freeClient(client *c) {
     zfree(c);
 }
 
-/* Schedule a client to free it at a safe time in the serverCron() function.
+/*
+ * Schedule a client to free it at a safe time in the serverCron() function.
  * This function is useful when we need to terminate a client but we are in
  * a context where calling freeClient() is not possible, because the client
- * should be valid for the continuation of the flow of the program. */
+ * should be valid for the continuation of the flow of the program.
+ *
+ * 异步关闭客户端，此时仅记录到链表server.clients_to_close。
+ * （随后由freeClientsInAsyncFreeQueue()函数执行关闭操作，通过serverCron()触发）
+ */
 void freeClientAsync(client *c) {
     if (c->flags & CLIENT_CLOSE_ASAP || c->flags & CLIENT_LUA) return;
     c->flags |= CLIENT_CLOSE_ASAP;
     listAddNodeTail(server.clients_to_close,c);
 }
 
+/**
+ * 释放异步关闭的客户端.
+ * (由serverCron中调用)
+ */
 void freeClientsInAsyncFreeQueue(void) {
+    // 遍历clients_to_close链表
     while (listLength(server.clients_to_close)) {
         listNode *ln = listFirst(server.clients_to_close);
         client *c = listNodeValue(ln);
@@ -1318,6 +1362,13 @@ void processInputBuffer(client *c) {
     server.current_client = NULL;
 }
 
+/**
+ * 读取客户端的查询缓冲区内容
+ * @param el
+ * @param fd
+ * @param privdata
+ * @param mask
+ */
 void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     client *c = (client*) privdata;
     int nread, readlen;
@@ -1362,6 +1413,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     c->lastinteraction = server.unixtime;
     if (c->flags & CLIENT_MASTER) c->reploff += nread;
     server.stat_net_input_bytes += nread;
+    // 查询缓冲区长度超出服务器设置的最大缓冲区长度, 清空缓冲区并释放客户端
     if (sdslen(c->querybuf) > server.client_max_querybuf_len) {
         sds ci = catClientInfoString(sdsempty(),c), bytes = sdsempty();
 
@@ -1840,19 +1892,24 @@ int checkClientOutputBufferLimits(client *c) {
     return soft || hard;
 }
 
-/* Asynchronously close a client if soft or hard limit is reached on the
+/*
+ * Asynchronously close a client if soft or hard limit is reached on the
  * output buffer size. The caller can check if the client will be closed
  * checking if the client CLIENT_CLOSE_ASAP flag is set.
- *
+ * 如果客户端达到缓冲区大小的软性或者硬性限制, 异步关闭客户端.
  * Note: we need to close the client asynchronously because this function is
  * called from contexts where the client can't be freed safely, i.e. from the
- * lower level functions pushing data inside the client output buffers. */
+ * lower level functions pushing data inside the client output buffers.
+ * 使用异步关闭而不是直接关闭的原因是, 客户端处于不能被安全关闭的上下文中
+ * 比如说一些底层函数, 推入数据到客户端输出缓冲区里
+ */
 void asyncCloseClientOnOutputBufferLimitReached(client *c) {
     serverAssert(c->reply_bytes < SIZE_MAX-(1024*64));
     if (c->reply_bytes == 0 || c->flags & CLIENT_CLOSE_ASAP) return;
+    // 如果超过输出缓冲区的软硬设置, 异步关闭客户端
     if (checkClientOutputBufferLimits(c)) {
         sds client = catClientInfoString(sdsempty(),c);
-
+        // 异步关闭
         freeClientAsync(c);
         serverLog(LL_WARNING,"Client %s scheduled to be closed ASAP for overcoming of output buffer limits.", client);
         sdsfree(client);

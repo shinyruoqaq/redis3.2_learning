@@ -32,9 +32,30 @@
 #define __INTSET_H
 #include <stdint.h>
 
+/**
+ * intset即整数集合。用一个连续数组来存储整数元素。
+ * 元素存储在contents中，从小到大排序，并且无重复。
+ *
+ * 有三种encoding
+ *  #define INTSET_ENC_INT16 (sizeof(int16_t))
+ *  #define INTSET_ENC_INT32 (sizeof(int32_t))
+ *  #define INTSET_ENC_INT64 (sizeof(int64_t))
+ * 分别对应int16, int32, int64，代表元素类型。
+ *
+ * 默认encoding为int16，当插入元素超过该encoding的整数范围时，会进行encoding升级，重新创建contents。时间复杂度O(n)
+ * 由于contents有序，所以可以用二分查找定位元素。
+ *
+ */
 typedef struct intset {
+    // 数据编码，表示 intset 中每个整数是用几个字节来编码存储的
+    // 默认为INTSET_ENC_INT16，即contents[]元素类型为int16
     uint32_t encoding;
+    // intset 中的元素个数，即contents数组长度
     uint32_t length;
+    /**
+     * 柔性数组，存储真正的整数数据项，按从小到大排序，并且不重复
+     * 虽然 contents 被声明为 int8_t 类型，但实际上它并不会保存任何 int8_t 元素，元素类型取决于 encoding 属性的值.
+     */
     int8_t contents[];
 } intset;
 
