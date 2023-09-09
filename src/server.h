@@ -590,7 +590,7 @@ typedef struct client {
     robj **argv;            /* 当前命令的参数的字符串对象数组. argv[0]为待执行命令. Arguments of current command. */
     struct redisCommand *cmd, *lastcmd;  /* 当前命令、上一条命令. Last command executed. */
     int reqtype;            /* 请求的类型: 内联命令还是多条命令. Request protocol type: PROTO_REQ_* */
-    int multibulklen;       /* 剩余未读取的命令内容数量. Number of multi bulk arguments left to read. */
+    int multibulklen;       /* 剩余未读取的命令内容(即参数)数量. Number of multi bulk arguments left to read. */
     long bulklen;           /* 命令内容的长度. Length of bulk argument in multi bulk request. */
     list *reply;            /* 等待发送给客户端的回复的链表. List of reply objects to send to the client. */
     unsigned long long reply_bytes; /* 回复链表里内容的总字节数. Tot bytes of objects in reply list. */
@@ -728,7 +728,7 @@ struct redisServer {
     char **exec_argv;           /* Executable argv vector (copy). */
     int hz;                     /* serverCron() calls frequency in hertz */
     redisDb *db;                // db数组。该实例的所有数据库
-    dict *commands;             /* Command table */
+    dict *commands;             /* 命令表: k:命令名称sds, v:redisCommand对象. Command table */
     dict *orig_commands;        /* Command table before command renaming. */
     aeEventLoop *el;
     unsigned lruclock:LRU_BITS; /* Clock for LRU eviction */

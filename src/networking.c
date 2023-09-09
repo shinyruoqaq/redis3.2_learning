@@ -336,6 +336,12 @@ void _addReplyStringToList(client *c, const char *s, size_t len) {
  * The following functions are the ones that commands implementations will call.
  * -------------------------------------------------------------------------- */
 
+/**
+ * 将响应数据写入客户端缓冲区
+ * (先尝试写入到client.buf，放不下则写入到client.reply)
+ * @param c client
+ * @param obj 响应内容
+ */
 void addReply(client *c, robj *obj) {
     if (prepareClientToWrite(c) != C_OK) return;
 
@@ -347,8 +353,8 @@ void addReply(client *c, robj *obj) {
      * we'll be able to send the object to the client without
      * messing with its page. */
     if (sdsEncodedObject(obj)) {
-        if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != C_OK)
-            _addReplyObjectToList(c,obj);
+        if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != C_OK)     // 先尝试写入到client.buf
+            _addReplyObjectToList(c,obj);   // 失败则写入到client.reply
     } else if (obj->encoding == OBJ_ENCODING_INT) {
         /* Optimization: if there is room in the static buffer for 32 bytes
          * (more than the max chars a 64 bit integer can take as string) we
@@ -616,8 +622,11 @@ void copyClientOutputBuffer(client *dst, client *src) {
     dst->reply_bytes = src->reply_bytes;
 }
 
-/* Return true if the specified client has pending reply buffers to write to
- * the socket. */
+/*
+ * Return true if the specified client has pending reply buffers to write to
+ * the socket.
+ * client回复缓冲区中是否还有内容
+ */
 int clientHasPendingReplies(client *c) {
     return c->bufpos || listLength(c->reply);
 }
@@ -941,8 +950,16 @@ void freeClientsInAsyncFreeQueue(void) {
     }
 }
 
-/* Write data in output buffers to client. Return C_OK if the client
- * is still valid after the call, C_ERR if it was freed. */
+/**
+ * Write data in output buffers to client. Return C_OK if the client
+ * is still valid after the call, C_ERR if it was freed.
+ * 将client回复缓冲区的数据写入到 socket发送缓冲区
+ *
+ * @param fd client socket
+ * @param c client
+ * @param handler_installed
+ * @return
+ */
 int writeToClient(int fd, client *c, int handler_installed) {
     ssize_t nwritten = 0, totwritten = 0;
     size_t objlen;
@@ -951,6 +968,7 @@ int writeToClient(int fd, client *c, int handler_installed) {
 
     while(clientHasPendingReplies(c)) {
         if (c->bufpos > 0) {
+            // 将client回复缓冲区的数据写入到 socket发送缓冲区
             nwritten = write(fd,c->buf+c->sentlen,c->bufpos-c->sentlen);
             if (nwritten <= 0) break;
             c->sentlen += nwritten;
@@ -1035,26 +1053,37 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     writeToClient(fd,privdata,1);
 }
 
-/* This function is called just before entering the event loop, in the hope
+/*
+ * This function is called just before entering the event loop, in the hope
  * we can just write the replies to the client output buffer without any
  * need to use a syscall in order to install the writable event handler,
- * get it called, and so forth. */
+ * get it called, and so forth.
+ *
+ * 在beforeSleep()中调用，将客户端的回复缓冲区数据写到 TCP 的发送缓冲区
+ */
 int handleClientsWithPendingWrites(void) {
     listIter li;
     listNode *ln;
     int processed = listLength(server.clients_pending_write);
 
+    // 创建server.clients_pending_write的迭代器
     listRewind(server.clients_pending_write,&li);
+    // 开始遍历server.clients_pending_write链表
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         c->flags &= ~CLIENT_PENDING_WRITE;
+        // 删除当前节点
         listDelNode(server.clients_pending_write,ln);
 
         /* Try to write buffers to the client socket. */
+        // 将client回复缓冲区的数据写入到 clientSocket发送缓冲区
         if (writeToClient(c->fd,c,0) == C_ERR) continue;
 
         /* If after the synchronous writes above we still have data to
          * output to the client, we need to install the writable handler. */
+        // client 的回复缓冲区还有内容，说明没有完全写入到 socket发送缓冲，说明内容过多，socket已被写满。
+        // 此时就给客户端连接注册监听 WRITABLE 类型的文件事件，事件回调函数为 sendReplyToClient，
+        // 当 fd 可写后，会继续调用 writeToClient
         if (clientHasPendingReplies(c)) {
             int ae_flags = AE_WRITABLE;
             /* For the fsync=always policy, we want that a given FD is never
@@ -1070,14 +1099,17 @@ int handleClientsWithPendingWrites(void) {
             if (aeCreateFileEvent(server.el, c->fd, ae_flags,
                 sendReplyToClient, c) == AE_ERR)
             {
-                    freeClientAsync(c);
+                freeClientAsync(c);
             }
         }
     }
     return processed;
 }
 
-/* resetClient prepare the client to process the next command */
+/*
+ * resetClient prepare the client to process the next command
+ * 重置客户端以处理下一个命令
+ */
 void resetClient(client *c) {
     redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
 
@@ -1175,16 +1207,25 @@ static void setProtocolError(client *c, int pos) {
     sdsrange(c->querybuf,pos,-1);
 }
 
+/**
+ * 解析client.querybuf中的命令内容
+ * 保存参数到clent.argv数组
+ * @param c
+ * @return
+ */
 int processMultibulkBuffer(client *c) {
     char *newline = NULL;
     int pos = 0, ok;
     long long ll;
 
+    // c->multibulklen 为 0 表示上一个命令已经解析完全，然后通过 resetClient 重置为 0
+    // 开始解析一个新的命令请求，通过 \r\n 分隔符从当前请求数据中解析当前命令参数数量
     if (c->multibulklen == 0) {
         /* The client should have been reset */
         serverAssertWithInfo(c,NULL,c->argc == 0);
 
         /* Multi bulk length cannot be read without a \r\n */
+        // strchr用于在一个字符串中查找指定字符的第一次出现位置，并返回该位置上字符的指针
         newline = strchr(c->querybuf,'\r');
         if (newline == NULL) {
             if (sdslen(c->querybuf) > PROTO_INLINE_MAX_SIZE) {
@@ -1195,12 +1236,15 @@ int processMultibulkBuffer(client *c) {
         }
 
         /* Buffer should also contain \n */
+        // newline-(c->querybuf)即\r在数组的索引。
+        // 这个校验就是确保\r后面有数据，并且是\n。
         if (newline-(c->querybuf) > ((signed)sdslen(c->querybuf)-2))
             return C_ERR;
 
         /* We know for sure there is a whole line since newline != NULL,
          * so go ahead and find out the multi bulk length. */
         serverAssertWithInfo(c,NULL,c->querybuf[0] == '*');
+        // 根据 \r\n 分隔符的位置读取当前参数的数量，存储到 ll 变量中，最终会赋值给 c->multibulklen
         ok = string2ll(c->querybuf+1,newline-(c->querybuf+1),&ll);
         if (!ok || ll > 1024*1024) {
             addReplyError(c,"Protocol error: invalid multibulk length");
@@ -1210,6 +1254,7 @@ int processMultibulkBuffer(client *c) {
 
         pos = (newline-c->querybuf)+2;
         if (ll <= 0) {
+            // 相当于python切片：c.querybuf = c.querybuf[pos:-1]
             sdsrange(c->querybuf,pos,-1);
             return C_OK;
         }
@@ -1218,10 +1263,12 @@ int processMultibulkBuffer(client *c) {
 
         /* Setup argv array on client structure */
         if (c->argv) zfree(c->argv);
+        // 根据参数数量 为参数数组分配内存
         c->argv = zmalloc(sizeof(robj*)*c->multibulklen);
     }
 
     serverAssertWithInfo(c,NULL,c->multibulklen > 0);
+    // 后面就是命令内容解析（根据resp协议）
     while(c->multibulklen) {
         /* Read bulk length if unknown */
         if (c->bulklen == -1) {
@@ -1294,6 +1341,7 @@ int processMultibulkBuffer(client *c) {
                 sdsclear(c->querybuf);
                 pos = 0;
             } else {
+                // 保存参数到client.argv数组
                 c->argv[c->argc++] =
                     createStringObject(c->querybuf+pos,c->bulklen);
                 pos += c->bulklen+2;
@@ -1307,12 +1355,20 @@ int processMultibulkBuffer(client *c) {
     if (pos) sdsrange(c->querybuf,pos,-1);
 
     /* We're done when c->multibulk == 0 */
+    // 代表当前命令数据已经读取完全，返回 C_OK，参数都处理好后，之后的步骤就是执行命令
     if (c->multibulklen == 0) return C_OK;
 
     /* Still not read to process the command */
+    // 说明还有数据没读取到，等待下次继续调用 readQueryFromClient 函数继续读取解析。
+    // （这其实就是对tcp拆包的处理）
     return C_ERR;
 }
 
+/**
+ * 处理读取到的数据
+ * (client.querybuf)
+ * @param c
+ */
 void processInputBuffer(client *c) {
     server.current_client = c;
     /* Keep processing while there is something in the input buffer */
@@ -1331,10 +1387,13 @@ void processInputBuffer(client *c) {
         if (c->flags & (CLIENT_CLOSE_AFTER_REPLY|CLIENT_CLOSE_ASAP)) break;
 
         /* Determine request type when unknown. */
+        // 确定请求数据类型
         if (!c->reqtype) {
             if (c->querybuf[0] == '*') {
+                // 开头为*，说明是resp协议的请求
                 c->reqtype = PROTO_REQ_MULTIBULK;
             } else {
+                // 否则的话判断为 INLINE，例如给 telnet 客户端使用，可直接输入命令执行
                 c->reqtype = PROTO_REQ_INLINE;
             }
         }
@@ -1342,12 +1401,15 @@ void processInputBuffer(client *c) {
         if (c->reqtype == PROTO_REQ_INLINE) {
             if (processInlineBuffer(c) != C_OK) break;
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
+            // resp协议处理
             if (processMultibulkBuffer(c) != C_OK) break;
         } else {
             serverPanic("Unknown request type");
         }
 
         /* Multibulk processing could see a <= 0 length. */
+        // 如果参数数量为 0，则直接重置客户端，等待下次命令执行
+        // 类似主从同步的场景，客户端会发送空行请求，所以可以重置
         if (c->argc == 0) {
             resetClient(c);
         } else {
@@ -1394,7 +1456,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     qblen = sdslen(c->querybuf);
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;     // 更新querybuf使用峰值
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
-    nread = read(fd, c->querybuf+qblen, readlen);   // 读数据
+    nread = read(fd, c->querybuf+qblen, readlen);   // 从client socket中读数据，放到clent.querybuf
     if (nread == -1) {
         if (errno == EAGAIN) {
             return;
@@ -1424,6 +1486,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
         freeClient(c);
         return;
     }
+    // 处理读取到的数据
     processInputBuffer(c);
 }
 

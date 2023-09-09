@@ -1323,9 +1323,12 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     return 1000/server.hz;
 }
 
-/* This function gets called every time Redis is entering the
+/*
+ * This function gets called every time Redis is entering the
  * main loop of the event driven library, that is, before to sleep
- * for ready file descriptors. */
+ * for ready file descriptors.
+ * 调用aeProcessEvents之前执行
+ */
 void beforeSleep(struct aeEventLoop *eventLoop) {
     UNUSED(eventLoop);
 
@@ -1770,7 +1773,8 @@ void checkTcpBacklogSettings(void) {
 #endif
 }
 
-/* Initialize a set of file descriptors to listen to the specified 'port'
+/*
+ * Initialize a set of file descriptors to listen to the specified 'port'
  * binding the addresses specified in the Redis server configuration.
  *
  * The listening file descriptors are stored in the integer array 'fds'
@@ -1787,7 +1791,11 @@ void checkTcpBacklogSettings(void) {
  * error, at least one of the server.bindaddr addresses was
  * impossible to bind, or no bind addresses were specified in the server
  * configuration but the function is not able to bind * for at least
- * one of the IPv4 or IPv6 protocols. */
+ * one of the IPv4 or IPv6 protocols.
+ *
+ * 创建server socket，保存到*fds中。
+ *
+ */
 int listenToPort(int port, int *fds, int *count) {
     int j;
 
@@ -1910,6 +1918,7 @@ void initServer(void) {
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Open the TCP listening socket for the user commands. */
+    // 创建server socket，保存到server.ipfd数组
     if (server.port != 0 &&
         listenToPort(server.port,server.ipfd,&server.ipfd_count) == C_ERR)
         exit(1);
@@ -1980,9 +1989,10 @@ void initServer(void) {
 
     /* Create an event handler for accepting new connections in TCP and Unix
      * domain sockets. */
+    // 为server socket创建aeFileEvent对象，保存到eventLoop.events数组中
     for (j = 0; j < server.ipfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.ipfd[j], AE_READABLE,
-            acceptTcpHandler,NULL) == AE_ERR)
+            acceptTcpHandler,NULL) == AE_ERR)   // 绑定的是acceptTcpHandler处理函数
             {
                 serverPanic(
                     "Unrecoverable error creating server.ipfd file event.");
@@ -2114,6 +2124,11 @@ void redisOpArrayFree(redisOpArray *oa) {
 
 /* ====================== Commands lookup and execution ===================== */
 
+/**
+ * 根据命令名称查找命令
+ * @param name
+ * @return
+ */
 struct redisCommand *lookupCommand(sds name) {
     return dictFetchValue(server.commands, name);
 }
@@ -2266,12 +2281,15 @@ void call(client *c, int flags) {
 
     /* Initialization: clear the flags that must be set by the command on
      * demand, and initialize the array for additional commands propagation. */
+    // 先重置传播控制标志，这些标识应该只能在命令执行过程中才设置，
+    // 由于call函数是可以递归调用的，所以执行命令前需要先清除这些标识
     c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
     redisOpArrayInit(&server.also_propagate);
 
     /* Call the command. */
     dirty = server.dirty;
     start = ustime();
+    // 执行！！！！！！！！
     c->cmd->proc(c);
     duration = ustime()-start;
     dirty = server.dirty-dirty;
@@ -2306,6 +2324,7 @@ void call(client *c, int flags) {
     }
 
     /* Propagate the command into the AOF and replication link */
+    // 传播该命令到aof 和 复制
     if (flags & CMD_CALL_PROPAGATE &&
         (c->flags & CLIENT_PREVENT_PROP) != CLIENT_PREVENT_PROP)
     {
@@ -2365,14 +2384,19 @@ void call(client *c, int flags) {
     server.stat_numcommands++;
 }
 
-/* If this function gets called we already read a whole
+/*
+ * If this function gets called we already read a whole
  * command, arguments are in the client argv/argc fields.
  * processCommand() execute the command or prepare the
  * server for a bulk read from the client.
  *
  * If C_OK is returned the client is still alive and valid and
  * other operations can be performed by the caller. Otherwise
- * if C_ERR is returned the client was destroyed (i.e. after QUIT). */
+ * if C_ERR is returned the client was destroyed (i.e. after QUIT).
+ *
+ * 各种检查 & 命令执行
+ * (此时已经将客户端传来的原始字符串按照resp协议解析完毕，设置到client的相关字段中，如client.argv)
+ */
 int processCommand(client *c) {
     /* The QUIT command is handled separately. Normal command procs will
      * go through checking for replication and QUIT will cause trouble
@@ -2386,14 +2410,15 @@ int processCommand(client *c) {
 
     /* Now lookup the command and check ASAP about trivial error conditions
      * such as wrong arity, bad command name and so forth. */
+    // 找到对应的redisCommand
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
-    if (!c->cmd) {
+    if (!c->cmd) {  // 命令不存在
         flagTransaction(c);
         addReplyErrorFormat(c,"unknown command '%s'",
             (char*)c->argv[0]->ptr);
         return C_OK;
     } else if ((c->cmd->arity > 0 && c->cmd->arity != c->argc) ||
-               (c->argc < -c->cmd->arity)) {
+               (c->argc < -c->cmd->arity)) {    // 命令参数个数不正确
         flagTransaction(c);
         addReplyErrorFormat(c,"wrong number of arguments for '%s' command",
             c->cmd->name);
@@ -2401,6 +2426,7 @@ int processCommand(client *c) {
     }
 
     /* Check if the user is authenticated */
+    // 客户端是否已完成密码认证
     if (server.requirepass && !c->authenticated && c->cmd->proc != authCommand)
     {
         flagTransaction(c);
@@ -2412,6 +2438,7 @@ int processCommand(client *c) {
      * However we don't perform the redirection if:
      * 1) The sender of this command is our master.
      * 2) The command has no key arguments. */
+    // 集群相关，检查节点是不是命令操作的键对应的节点，如果不是就返 ASK 或者 MOVED 重定向
     if (server.cluster_enabled &&
         !(c->flags & CLIENT_MASTER) &&
         !(c->flags & CLIENT_LUA &&
@@ -2421,10 +2448,11 @@ int processCommand(client *c) {
     {
         int hashslot;
         int error_code;
+        // 获取命令key所在节点
         clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,
                                         &hashslot,&error_code);
         if (n == NULL || n != server.cluster->myself) {
-            if (c->cmd->proc == execCommand) {
+            if (c->cmd->proc == execCommand) {  // 是exec命令
                 discardTransaction(c);
             } else {
                 flagTransaction(c);
@@ -2457,6 +2485,7 @@ int processCommand(client *c) {
 
     /* Don't accept write commands if there are problems persisting on disk
      * and if this is a master instance. */
+    // 如果当前节点是主节点但是持久化出现问题，则不接收写命令
     if (((server.stop_writes_on_bgsave_err &&
           server.saveparamslen > 0 &&
           server.lastbgsave_status == C_ERR) ||
@@ -2478,6 +2507,7 @@ int processCommand(client *c) {
 
     /* Don't accept write commands if there are not enough good slaves and
      * user configured the min-slaves-to-write option. */
+    // 如果当前节点是master，但没有足够的正常slave，则不接收写命令
     if (server.masterhost == NULL &&
         server.repl_min_slaves_to_write &&
         server.repl_min_slaves_max_lag &&
@@ -2491,6 +2521,7 @@ int processCommand(client *c) {
 
     /* Don't accept write commands if this is a read only slave. But
      * accept write commands if this is our master. */
+    // 如果当前节点是设为只读的从节点，则不接收写命令
     if (server.masterhost && server.repl_slave_ro &&
         !(c->flags & CLIENT_MASTER) &&
         c->cmd->flags & CMD_WRITE)
@@ -2544,14 +2575,19 @@ int processCommand(client *c) {
         return C_OK;
     }
 
-    /* Exec the command */
+    /*
+     * Exec the command
+     * 尝试执行命令
+     */
     if (c->flags & CLIENT_MULTI &&
         c->cmd->proc != execCommand && c->cmd->proc != discardCommand &&
         c->cmd->proc != multiCommand && c->cmd->proc != watchCommand)
-    {
+    {   // client处于事务中，且不是exec, dicard, multi, watch 命令
+        // 事务命令入队
         queueMultiCommand(c);
         addReply(c,shared.queued);
     } else {
+        // 执行命令
         call(c,CMD_CALL_FULL);
         c->woff = server.master_repl_offset;
         if (listLength(server.ready_keys))

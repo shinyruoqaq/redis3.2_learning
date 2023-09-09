@@ -66,17 +66,25 @@ typedef int aeTimeProc(struct aeEventLoop *eventLoop, long long id, void *client
 typedef void aeEventFinalizerProc(struct aeEventLoop *eventLoop, void *clientData);
 typedef void aeBeforeSleepProc(struct aeEventLoop *eventLoop);
 
-/* File event structure
- * BARRIER事件类型：通常情况下 ae是先处理可读事件再处理可写事件，但如果类型为BARRIER则相反，先处理可写事件再处理可读事件。
- * 比如aof flush 需要在回复客户端响应之前将 aof 刷盘 */
+/*
+ * File event structure
+ * (aeFileEvent没有存储对应的fd，因为aeFileEvent被存储在aeEventLoop.events数组中，所在的索引就是他对应的fd.
+ * 当eventloop检车到某个fd的时间时，就调用events[fd]中对应的处理函数)*/
 typedef struct aeFileEvent {
+    // BARRIER事件类型：通常情况下 ae是先处理可读事件再处理可写事件，但如果类型为BARRIER则相反，先处理可写事件再处理可读事件。
+    // 比如aof flush 需要在回复客户端响应之前将 aof 刷盘.
     int mask; /* 监听的文件事件类型。one of AE_(READABLE|WRITABLE|BARRIER) */
     aeFileProc *rfileProc;  /* AE_READABLE读事件处理函数 */
     aeFileProc *wfileProc;  /* AE_WRITABLE写事件处理函数 */
     void *clientData;       /* 附加数据 */
 } aeFileEvent;
 
-/* Time event structure */
+/*
+ * Time event structure.
+ * 时间事件，主要用于redis自身的周期性任务操作。
+ * 存放在aeEventloop.timeEventHead链表中
+ * (例如serverCron)
+ */
 typedef struct aeTimeEvent {
     long long id; /* 时间事件id，从1开始自增。time event identifier. */
     long when_sec; /* 时间事件下一次触发的时间。seconds */
@@ -84,11 +92,14 @@ typedef struct aeTimeEvent {
     aeTimeProc *timeProc;  /* 时间事件处理函数 */
     aeEventFinalizerProc *finalizerProc;  /* 时间事件的析构函数 */
     void *clientData;  /* 客户端传入的附加数据 */
-    struct aeTimeEvent *next;   /* 下一个时间事件 */
+    struct aeTimeEvent *next;   /* 下一个时间事件（所在链表中的下一个节点） */
 } aeTimeEvent;
 
-/* A fired event
- * 就绪的文件事件 */
+/*
+ * A fired event
+ * 就绪的文件事件.
+ * (被存放在 aeEventLoop.fired中)
+ */
 typedef struct aeFiredEvent {
     int fd;     /* 文件描述符 */
     int mask;   /* 产生的事件类型掩码 */
@@ -101,7 +112,7 @@ typedef struct aeEventLoop {
     long long timeEventNextId  /* 用于生产时间事件，next_id，下一个时间事件id */;
     time_t lastTime;     /* 最后一次执行时间事件的时间，用于检测时钟偏移。Used to detect system clock skew */
     aeFileEvent *events; /* 已注册的文件事件。Registered events */
-    aeFiredEvent *fired; /* 已就绪的文件事件。Fired events */
+    aeFiredEvent *fired; /* 已就绪的文件事件。当eventloop监听到事件，就会存放到该数组中。Fired events */
     aeTimeEvent *timeEventHead;  /* 时间事件链表头节点。*/
     int stop;  /* 事件处理器开关，是否停止。*/
     void *apidata; /* 多路复用库的私有数据，例如select里面是:rfds,wfds。This is used for polling API specific data */

@@ -288,8 +288,10 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
     return nearest;
 }
 
-/* Process time events
- * 处理time event */
+/*
+ * Process time events
+ * 遍历时间事件链表，执行到期的时间事件
+ */
 static int processTimeEvents(aeEventLoop *eventLoop) {
     int processed = 0;
     aeTimeEvent *te, *prev;
@@ -303,7 +305,8 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
      * Here we try to detect system clock skews, and force all the time
      * events to be processed ASAP when this happens: the idea is that
      * processing events earlier is less dangerous than delaying them
-     * indefinitely, and practice suggests it is. */
+     * indefinitely, and practice suggests it is.
+     * 处理时钟偏移 */
     if (now < eventLoop->lastTime) {
         te = eventLoop->timeEventHead;
         while(te) {
@@ -360,11 +363,12 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             // 执行时间事件处理函数(例如serverCron)，并返回事件下次执行的时间间隔
             retval = te->timeProc(eventLoop, id, te->clientData);
             processed++;
-            if (retval != AE_NOMORE) {
+            if (retval != AE_NOMORE/*-1*/) {
                 // 重新设置时间事件的下次执行时间
                 aeAddMillisecondsToNow(retval,&te->when_sec,&te->when_ms);
             } else {
-                te->id = AE_DELETED_EVENT_ID;
+                // 标记删除。在下次遍历链表时才会真正删除
+                te->id = AE_DELETED_EVENT_ID/*-1*/;
             }
         }
         prev = te;
@@ -403,13 +407,13 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
      * 所以需要扫描timeEvent链表，找出最近的timeEvent，算出最大可阻塞时间。
      * 然后设置select/epoll的超时参数 */
     if (eventLoop->maxfd != -1 ||
-        ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {
+        ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {    // 如果需要处理时间事件
         int j;
         aeTimeEvent *shortest = NULL;
-        struct timeval tv, *tvp;
+        struct timeval tv, *tvp;    // eventloop阻塞时间
 
-        // 需要处理timeEvent
-        if (flags & AE_TIME_EVENTS && !(flags & AE_DONT_WAIT))
+        // 1. 根据最近的时间事件，计算eventloop阻塞时间
+        if (flags & AE_TIME_EVENTS && !(flags & AE_DONT_WAIT))  // 需要处理timeEvent
             // 找到最近的time event。
             shortest = aeSearchNearestTimer(eventLoop);
         if (shortest) {
@@ -445,14 +449,16 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
         }
 
-        // select
+        // 2. eventloop超时阻塞获取事件
+        // (将得到的就绪事件存储在eventloop.fired中)
         numevents = aeApiPoll(eventLoop, tvp);
-        // 处理文件事件
+
+        // 3. 处理文件事件
         for (j = 0; j < numevents; j++) {
             aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
             int mask = eventLoop->fired[j].mask;
             int fd = eventLoop->fired[j].fd;
-            int fired = 0; /* Number of events fired for current fd. */
+            int fired = 0; /* 记录该fd的就绪事件数量. Number of events fired for current fd. */
 
             /* Normally we execute the readable event first, and the writable
              * event laster. This is useful as sometimes we may be able
@@ -465,20 +471,23 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
              * This is useful when, for instance, we want to do things
              * in the beforeSleep() hook, like fsynching a file to disk,
              * before replying to a client. */
+            // 是否设置了AE_BARRIER标识
             int invert = fe->mask & AE_BARRIER;
 
-	    /* Note the "fe->mask & mask & ..." code: maybe an already
+	        /* Note the "fe->mask & mask & ..." code: maybe an already
              * processed event removed an element that fired and we still
              * didn't processed, so we check if the event is still valid.
              *
              * Fire the readable event if the call sequence is not
              * inverted. */
+            // 如果没有设置 AE_BARRIER，而有 可读事件就绪，调用aeFileEvent.rfileProc处理
             if (!invert && fe->mask & mask & AE_READABLE) {
                 fe->rfileProc(eventLoop,fd,fe->clientData,mask);
                 fired++;
             }
 
             /* Fire the writable event. */
+            // 可写事件就绪，调用 wfileProc 处理它
             if (fe->mask & mask & AE_WRITABLE) {
                 if (!fired || fe->wfileProc != fe->rfileProc) {
                     fe->wfileProc(eventLoop,fd,fe->clientData,mask);
@@ -488,6 +497,8 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 
             /* If we have to invert the call, fire the readable event now
              * after the writable one. */
+            // 设置了 AE_BARRIER，有可读事件就绪，回来处理可读事件，调用 rfileProc 处理它
+            // (也就是说，如果设置了AE_BARRIER，会先处理写事件再处理读事件)
             if (invert && fe->mask & mask & AE_READABLE) {
                 if (!fired || fe->wfileProc != fe->rfileProc) {
                     fe->rfileProc(eventLoop,fd,fe->clientData,mask);
@@ -498,8 +509,10 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             processed++;
         }
     }
-    /* Check time events
-     * 执行时间事件*/
+    /*
+     * Check time events
+     * 4. 尝试执行时间事件
+     */
     if (flags & AE_TIME_EVENTS)
         processed += processTimeEvents(eventLoop);
 
