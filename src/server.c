@@ -895,8 +895,13 @@ void activeExpireCycle(int type) {
     }
 }
 
+/**
+ * 获取lru时钟。
+ * LRU_CLOCK_RESOLUTION为1000，也就是说精度为秒。
+ * @return
+ */
 unsigned int getLRUClock(void) {
-    return (mstime()/LRU_CLOCK_RESOLUTION) & LRU_CLOCK_MAX;
+    return (mstime()/LRU_CLOCK_RESOLUTION/*1000*/) & LRU_CLOCK_MAX/*(1<<LRU_BITS)-1*/;
 }
 
 /* Add a sample to the operations per second array of samples. */
@@ -1133,7 +1138,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      *
      * Note that you can change the resolution altering the
      * LRU_CLOCK_RESOLUTION define.
-     * 更新全局lru时钟 */
+     * 更新全局lru时钟（之后更新对象的lru值时，就直接从该时钟获取当前事件，节省系统调用） */
     server.lruclock = getLRUClock();
 
     /* Record the max memory used since the server was started. */
@@ -3445,30 +3450,34 @@ struct evictionPoolEntry *evictionPoolAlloc(void) {
     return ep;
 }
 
-/* This is an helper function for freeMemoryIfNeeded(), it is used in order
+/*
+ * This is an helper function for freeMemoryIfNeeded(), it is used in order
  * to populate the evictionPool with a few entries every time we want to
  * expire a key. Keys with idle time smaller than one of the current
  * keys are added. Keys are always added if there are free entries.
  *
  * We insert keys on place in ascending order, so keys with the smaller
  * idle time are on the left, and keys with the higher idle time on the
- * right. */
-
+ * right.
+ * 将被取样的key放到驱逐池中。
+ */
 #define EVICTION_SAMPLES_ARRAY_SIZE 16
 void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEntry *pool) {
     int j, k, count;
-    dictEntry *_samples[EVICTION_SAMPLES_ARRAY_SIZE];
+    dictEntry *_samples[EVICTION_SAMPLES_ARRAY_SIZE/*16*/];
     dictEntry **samples;
 
     /* Try to use a static buffer: this function is a big hit...
      * Note: it was actually measured that this helps. */
-    if (server.maxmemory_samples <= EVICTION_SAMPLES_ARRAY_SIZE) {
+    if (server.maxmemory_samples/*5*/ <= EVICTION_SAMPLES_ARRAY_SIZE/*16*/) {
         samples = _samples;
     } else {
         samples = zmalloc(sizeof(samples[0])*server.maxmemory_samples);
     }
 
+    // 从采样字典(即键空间字典或过期字典)里随机挑选 指定数量的元素加入到 samples 中，返回实际加入的数量
     count = dictGetSomeKeys(sampledict,samples,server.maxmemory_samples);
+    // 遍历这些随机采样出来的键，选择驱逐效果最好的进行驱逐池的填充
     for (j = 0; j < count; j++) {
         unsigned long long idle;
         sds key;
@@ -3480,33 +3489,44 @@ void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEn
         /* If the dictionary we are sampling from is not the main
          * dictionary (but the expires one) we need to lookup the key
          * again in the key dictionary to obtain the value object. */
+        // 如果采样字段是过期字典，那么还需要从键空间字段中找到对应key
         if (sampledict != keydict) de = dictFind(keydict, key);
         o = dictGetVal(de);
+        // 计算空闲事件。当前时间-robj.lru
         idle = estimateObjectIdleTime(o);
 
         /* Insert the element inside the pool.
          * First, find the first empty bucket or the first populated
          * bucket that has an idle time smaller than our idle time. */
-        k = 0;
+        k = 0;  // 记录插入位置
+        // 首先找到可插入位置。（因为需要保持升序）
         while (k < MAXMEMORY_EVICTION_POOL_SIZE &&
                pool[k].key &&
                pool[k].idle < idle) k++;
+
+        // 插入前的预处理。因为是数组，要考虑元素右移或元素左移
         if (k == 0 && pool[MAXMEMORY_EVICTION_POOL_SIZE-1].key != NULL) {
             /* Can't insert if the element is < the worst element we have
              * and there are no empty buckets. */
+            // 键的 idle 比 pool 里最小的还小，并且没有空位置，无法插入，跳过这个键
             continue;
         } else if (k < MAXMEMORY_EVICTION_POOL_SIZE && pool[k].key == NULL) {
             /* Inserting into empty position. No setup needed before insert. */
+            // 该位置上没有元素，不需要特殊处理，后续直接插入即可
         } else {
             /* Inserting in the middle. Now k points to the first element
              * greater than the element to insert.  */
+            // 插入到中间，尝试把右边的元素往右挤，或者把左边的元素往左挤.
             if (pool[MAXMEMORY_EVICTION_POOL_SIZE-1].key == NULL) {
                 /* Free space on the right? Insert at k shifting
                  * all the elements from k to end to the right. */
+                // 说明右边有空位，则把右边的元素往右挤
                 memmove(pool+k+1,pool+k,
                     sizeof(pool[0])*(MAXMEMORY_EVICTION_POOL_SIZE-k-1));
             } else {
                 /* No free space on right? Insert at k-1 */
+                // 右边没空位了，则把左边的元素往左挤，第一个元素就不要了。（因为左侧的空闲时间更小，更不应该淘汰）
+                // 此时插入到k-1的位置（因为k上有元素啊）
                 k--;
                 /* Shift all elements on the left of k (included) to the
                  * left, so we discard the element with smaller idle time. */
@@ -3514,6 +3534,7 @@ void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEn
                 memmove(pool,pool+1,sizeof(pool[0])*k);
             }
         }
+        // 保存到驱逐池
         pool[k].key = sdsdup(key);
         pool[k].idle = idle;
     }
@@ -3555,6 +3576,7 @@ int freeMemoryIfNeeded(void) {
     /* Check if we are over the memory limit. */
     if (mem_used <= server.maxmemory) return C_OK;
 
+    // 设置了maxmemory，此时内存已满，但设置的是拒绝策略
     if (server.maxmemory_policy == MAXMEMORY_NO_EVICTION)
         return C_ERR; /* We need to free memory, but policy forbids. */
 
@@ -3566,6 +3588,7 @@ int freeMemoryIfNeeded(void) {
     while (mem_freed < mem_tofree) {
         int j, k, keys_freed = 0;
 
+        // 遍历db（一个库一次循环只会释放一个key）
         for (j = 0; j < server.dbnum; j++) {
             long bestval = 0; /* just to prevent warning */
             sds bestkey = NULL;
@@ -3584,6 +3607,7 @@ int freeMemoryIfNeeded(void) {
             if (dictSize(dict) == 0) continue;
 
             /* volatile-random and allkeys-random policy */
+            // 键空间随机 或 过期字段随机
             if (server.maxmemory_policy == MAXMEMORY_ALLKEYS_RANDOM ||
                 server.maxmemory_policy == MAXMEMORY_VOLATILE_RANDOM)
             {
@@ -3592,14 +3616,18 @@ int freeMemoryIfNeeded(void) {
             }
 
             /* volatile-lru and allkeys-lru policy */
+            // 键空间lru或过期字段lru
             else if (server.maxmemory_policy == MAXMEMORY_ALLKEYS_LRU ||
                 server.maxmemory_policy == MAXMEMORY_VOLATILE_LRU)
             {
                 struct evictionPoolEntry *pool = db->eviction_pool;
 
                 while(bestkey == NULL) {
+                    // 采样并填充驱逐池
                     evictionPoolPopulate(dict, db->dict, db->eviction_pool);
                     /* Go backward from best to worst element to evict. */
+                    // 从右往左遍历驱逐池，找到右边的第一个元素。（因为最右边的是空闲时间最大的）
+                    // 只会释放一个空闲时间最大的key
                     for (k = MAXMEMORY_EVICTION_POOL_SIZE-1; k >= 0; k--) {
                         if (pool[k].key == NULL) continue;
                         de = dictFind(dict,pool[k].key);

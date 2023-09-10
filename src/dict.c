@@ -689,7 +689,8 @@ dictEntry *dictGetRandomKey(dict *d)
     return he;
 }
 
-/* This function samples the dictionary to return a few keys from random
+/*
+ * This function samples the dictionary to return a few keys from random
  * locations.
  *
  * It does not guarantee to return all the keys specified in 'count', nor
@@ -710,7 +711,11 @@ dictEntry *dictGetRandomKey(dict *d)
  * of the returned items, but only when you need to "sample" a given number
  * of continuous elements to run some kind of algorithm or to produce
  * statistics. However the function is much faster than dictGetRandomKey()
- * at producing N elements. */
+ * at producing N elements.
+ *
+ * 从所给字典里随机挑选 指定数量的元素加入到 des 中，
+ * 返回实际加入的数量
+ */
 unsigned int dictGetSomeKeys(dict *d, dictEntry **des, unsigned int count) {
     unsigned long j; /* internal hash table id, 0 or 1. */
     unsigned long tables; /* 1 or 2 tables? */

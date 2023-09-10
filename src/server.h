@@ -471,11 +471,17 @@ typedef struct redisObject {
     void *ptr;  // 实际对象指针
 } robj;
 
-/* Macro used to obtain the current LRU clock.
+/*
+ * Macro used to obtain the current LRU clock.
  * If the current resolution is lower than the frequency we refresh the
  * LRU clock (as it should be in production servers) we return the
- * precomputed value, otherwise we need to resort to a system call. */
-#define LRU_CLOCK() ((1000/server.hz <= LRU_CLOCK_RESOLUTION) ? server.lruclock : getLRUClock())
+ * precomputed value, otherwise we need to resort to a system call.
+ *
+ * 这里是根据serverCron()执行频率 和 LRU 时钟精度做了一下计算。
+ * 如果serverCron执行频率高于时钟精度，说明缓存的LRU是比较准确的，则直接用缓存值。（因为缓存值是在serverCron更新的）
+ * 否则通过系统调用计算。
+ */
+#define LRU_CLOCK() ((1000/server.hz/*10*/ <= LRU_CLOCK_RESOLUTION) ? server.lruclock : getLRUClock())
 
 /* Macro used to initialize a Redis object allocated on the stack.
  * Note that this macro is taken near the structure definition to make sure
@@ -488,17 +494,19 @@ typedef struct redisObject {
     _var.ptr = _ptr; \
 } while(0)
 
-/* To improve the quality of the LRU approximation we take a set of keys
+/*
+ * To improve the quality of the LRU approximation we take a set of keys
  * that are good candidate for eviction across freeMemoryIfNeeded() calls.
  *
  * Entries inside the eviciton pool are taken ordered by idle time, putting
  * greater idle times to the right (ascending order).
  *
  * Empty entries have the key pointer set to NULL.
- * 驱逐池中的元素 */
-#define MAXMEMORY_EVICTION_POOL_SIZE 16
+ * 驱逐池中的元素
+ */
+#define MAXMEMORY_EVICTION_POOL_SIZE 16     // 驱逐池大小
 struct evictionPoolEntry {
-    unsigned long long idle;    /* Object idle time. */
+    unsigned long long idle;    /* lru空闲事件。驱逐池中的元素按该字段升序排列 Object idle time. */
     sds key;                    /* Key name. */
 };
 
@@ -519,7 +527,7 @@ typedef struct redisDb {
      */
     dict *ready_keys;           /* Blocked keys that received a PUSH */
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
-    struct evictionPoolEntry *eviction_pool;    /* Eviction pool of keys */
+    struct evictionPoolEntry *eviction_pool;    /* 驱逐池(用于内存淘汰)，默认长度16。Eviction pool of keys *  /
     int id;                     /* Database ID */
     /**
      * 数据库里键的平均 ttl，用于统计信息 stats
