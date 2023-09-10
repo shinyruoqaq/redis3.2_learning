@@ -639,6 +639,7 @@ ssize_t rdbSaveObject(rio *rdb, robj *o) {
             nwritten += n;
 
             while((de = dictNext(di)) != NULL) {
+                // 保存member 和 score
                 robj *eleobj = dictGetKey(de);
                 double *score = dictGetVal(de);
 
@@ -752,14 +753,18 @@ int rdbSaveInfoAuxFields(rio *rdb) {
     return 1;
 }
 
-/* Produces a dump of the database in RDB format sending it to the specified
+/*
+ * Produces a dump of the database in RDB format sending it to the specified
  * Redis I/O channel. On success C_OK is returned, otherwise C_ERR
  * is returned and part of the output, or all the output, can be
  * missing because of I/O errors.
  *
  * When the function returns C_ERR and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the value of errno just after the I/O
- * error. */
+ * error.
+ *
+ * rdb 持久化 核心代码
+ */
 int rdbSaveRio(rio *rdb, int *error) {
     dictIterator *di = NULL;
     dictEntry *de;
@@ -768,12 +773,16 @@ int rdbSaveRio(rio *rdb, int *error) {
     long long now = mstime();
     uint64_t cksum;
 
+    // 设置校验和函数，crc64
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
-    snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
+    // 写入魔数：REDIS+4位RDB版本号，高版本的 RDB 文件是无法被低版本 RDB server 解析的
+    snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION/*7,二进制0111*/);
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
+    // 写入一些 AUX(辅助)字段，例如 redis 版本，操作系统位数等元数据信息
     if (rdbSaveInfoAuxFields(rdb) == -1) goto werr;
 
+    // 遍历库
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
         dict *d = db->dict;
@@ -801,6 +810,7 @@ int rdbSaveRio(rio *rdb, int *error) {
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
 
         /* Iterate this DB writing every entry */
+        // 遍历键空间里的每一个键值对，写进 RDB
         while((de = dictNext(di)) != NULL) {
             sds keystr = dictGetKey(de);
             robj key, *o = dictGetVal(de);
@@ -857,6 +867,7 @@ werr: /* Write error. */
 }
 
 /* Save the DB on disk. Return C_ERR on error, C_OK on success. */
+// RDB save 的处理函数，将数据库快照数据保存在磁盘上
 int rdbSave(char *filename) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
@@ -864,6 +875,7 @@ int rdbSave(char *filename) {
     rio rdb;
     int error = 0;
 
+    // 创建 temp-pid.rdb 临时文件（写临时文件，避免多个rdb save造成并发写入）
     snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
     fp = fopen(tmpfile,"w");
     if (!fp) {
@@ -877,19 +889,23 @@ int rdbSave(char *filename) {
         return C_ERR;
     }
 
+    // 初始化 I/O 文件流
     rioInitWithFile(&rdb,fp);
+    // do save
     if (rdbSaveRio(&rdb,&error) == C_ERR) {
         errno = error;
         goto werr;
     }
 
     /* Make sure data will not remain on the OS's output buffers */
+    // fflush + fsync，确保数据落盘
     if (fflush(fp) == EOF) goto werr;
     if (fsync(fileno(fp)) == -1) goto werr;
     if (fclose(fp) == EOF) goto werr;
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
+    // 临时 RDB 文件写入完成，使用 rename 原子性的替换掉老的 RDB
     if (rename(tmpfile,filename) == -1) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
         serverLog(LL_WARNING,
@@ -916,6 +932,11 @@ werr:
     return C_ERR;
 }
 
+/**
+ * fork 子进程执行rdb save
+ * @param filename
+ * @return
+ */
 int rdbSaveBackground(char *filename) {
     pid_t childpid;
     long long start;
@@ -926,12 +947,14 @@ int rdbSaveBackground(char *filename) {
     server.lastbgsave_try = time(NULL);
 
     start = ustime();
-    if ((childpid = fork()) == 0) {
+    // fork子进程
+    if ((childpid = fork()) == 0) {     // 子进程分支（fork()在子进程的返回值是0）
         int retval;
 
         /* Child */
-        closeListeningSockets(0);
+        closeListeningSockets(0);   // 关闭所有server socket
         redisSetProcTitle("redis-rdb-bgsave");
+        // do save
         retval = rdbSave(filename);
         if (retval == C_OK) {
             size_t private_dirty = zmalloc_get_private_dirty();
@@ -942,21 +965,23 @@ int rdbSaveBackground(char *filename) {
                     private_dirty/(1024*1024));
             }
         }
+        // 子进程 bgsave 完成，退出
         exitFromChild((retval == C_OK) ? 0 : 1);
-    } else {
+    } else {        // 父进程分支
         /* Parent */
         server.stat_fork_time = ustime()-start;
         server.stat_fork_rate = (double) zmalloc_used_memory() * 1000000 / server.stat_fork_time / (1024*1024*1024); /* GB per second. */
         latencyAddSampleIfNeeded("fork",server.stat_fork_time/1000);
-        if (childpid == -1) {
+        if (childpid == -1) {   // fork 出错，一般是 OOM
             server.lastbgsave_status = C_ERR;
             serverLog(LL_WARNING,"Can't save in background: fork: %s",
                 strerror(errno));
             return C_ERR;
         }
+        // fork 成功，子进程正在进行 bgsave
         serverLog(LL_NOTICE,"Background saving started by pid %d",childpid);
         server.rdb_save_time_start = time(NULL);
-        server.rdb_child_pid = childpid;
+        server.rdb_child_pid = childpid;    // 记录rdb save子进程id
         server.rdb_child_type = RDB_CHILD_TYPE_DISK;
         updateDictResizePolicy();
         return C_OK;
@@ -1273,6 +1298,11 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     }
 }
 
+/**
+ * rdb载入
+ * @param filename
+ * @return
+ */
 int rdbLoad(char *filename) {
     uint32_t dbid;
     int type, rdbver;
@@ -1282,20 +1312,24 @@ int rdbLoad(char *filename) {
     FILE *fp;
     rio rdb;
 
+    // fopen 打开对应的文件
     if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
 
     rioInitWithFile(&rdb,fp);
     rdb.update_cksum = rdbLoadProgressCallback;
     rdb.max_processing_chunk = server.loading_process_events_interval_bytes;
+    // 先读9个字节，即开头的魔数+版本
     if (rioRead(&rdb,buf,9) == 0) goto eoferr;
     buf[9] = '\0';
-    if (memcmp(buf,"REDIS",5) != 0) {
+    if (memcmp(buf,"REDIS",5) != 0) {   // 必须REDIS开头
         fclose(fp);
         serverLog(LL_WARNING,"Wrong signature trying to load DB from file");
         errno = EINVAL;
         return C_ERR;
     }
+    // 字符串转整数
     rdbver = atoi(buf+5);
+    // rdb版本校验
     if (rdbver < 1 || rdbver > RDB_VERSION) {
         fclose(fp);
         serverLog(LL_WARNING,"Can't handle RDB format version %d",rdbver);
@@ -1309,9 +1343,11 @@ int rdbLoad(char *filename) {
         expiretime = -1;
 
         /* Read type. */
+        // rdb 再读一个字节，读出 opcode 操作码
         if ((type = rdbLoadType(&rdb)) == -1) goto eoferr;
 
         /* Handle special types. */
+        // 根据每种 opcode 进行不同的处理
         if (type == RDB_OPCODE_EXPIRETIME) {
             /* EXPIRETIME: load an expire associated with the next key
              * to load. Note that after loading an expire we need to
@@ -1328,10 +1364,10 @@ int rdbLoad(char *filename) {
             if ((expiretime = rdbLoadMillisecondTime(&rdb)) == -1) goto eoferr;
             /* We read the time so we need to read the object type again. */
             if ((type = rdbLoadType(&rdb)) == -1) goto eoferr;
-        } else if (type == RDB_OPCODE_EOF) {
+        } else if (type == RDB_OPCODE_EOF) {    // RDB 文件结束标识
             /* EOF: End of file, exit the main loop. */
             break;
-        } else if (type == RDB_OPCODE_SELECTDB) {
+        } else if (type == RDB_OPCODE_SELECTDB) {   // SELECT DB
             /* SELECTDB: Select the specified database. */
             if ((dbid = rdbLoadLen(&rdb,NULL)) == RDB_LENERR)
                 goto eoferr;
@@ -1344,7 +1380,7 @@ int rdbLoad(char *filename) {
             }
             db = server.db+dbid;
             continue; /* Read type again. */
-        } else if (type == RDB_OPCODE_RESIZEDB) {
+        } else if (type == RDB_OPCODE_RESIZEDB) {   // RESIZEDB
             /* RESIZEDB: Hint about the size of the keys in the currently
              * selected data base, in order to avoid useless rehashing. */
             uint32_t db_size, expires_size;
@@ -1355,7 +1391,7 @@ int rdbLoad(char *filename) {
             dictExpand(db->dict,db_size);
             dictExpand(db->expires,expires_size);
             continue; /* Read type again. */
-        } else if (type == RDB_OPCODE_AUX) {
+        } else if (type == RDB_OPCODE_AUX) {    // 辅助信息
             /* AUX: generic string-string fields. Use to add state to RDB
              * which is backward compatible. Implementations of RDB loading
              * are requierd to skip AUX fields they don't understand.
@@ -1384,6 +1420,9 @@ int rdbLoad(char *filename) {
             continue; /* Read type again. */
         }
 
+        // ##########################
+        // 载入键值对
+        // ##########################
         /* Read key */
         if ((key = rdbLoadStringObject(&rdb)) == NULL) goto eoferr;
         /* Read value */
@@ -1393,6 +1432,8 @@ int rdbLoad(char *filename) {
          * received from the master. In the latter case, the master is
          * responsible for key expiry. If we would expire keys here, the
          * snapshot taken by the master may not be reflected on the slave. */
+        // 如果当前为主节点，且该键有过期事件并且已过期，则对键和值对象的引用计数进行递减，相当于丢弃了这个键和值
+        // (这段代码确保主节点加载rdb时不会处理过期key，但若是从节点仍然会写入内存，因为key的删除完全由主节点控制)
         if (server.masterhost == NULL && expiretime != -1 && expiretime < now) {
             decrRefCount(key);
             decrRefCount(val);
@@ -1406,7 +1447,9 @@ int rdbLoad(char *filename) {
 
         decrRefCount(key);
     }
+
     /* Verify the checksum if RDB version is >= 5 */
+    // 如果 RDB 版本 >= 5 的话，如果有开启会检查最后的校验和
     if (rdbver >= 5 && server.rdb_checksum) {
         uint64_t cksum, expected = rdb.cksum;
 
@@ -1430,24 +1473,29 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
     return C_ERR; /* Just to avoid warning */
 }
 
-/* A background saving child (BGSAVE) terminated its work. Handle this.
- * This function covers the case of actual BGSAVEs. */
+/*
+ * A background saving child (BGSAVE) terminated its work. Handle this.
+ * This function covers the case of actual BGSAVEs.
+ * 对有盘bgsave的操作结果进行收尾处理
+ */
 void backgroundSaveDoneHandlerDisk(int exitcode, int bysignal) {
-    if (!bysignal && exitcode == 0) {
+    if (!bysignal && exitcode == 0) {   // bgsave 成功
         serverLog(LL_NOTICE,
             "Background saving terminated with success");
+        // 重置一些变量
         server.dirty = server.dirty - server.dirty_before_bgsave;
         server.lastsave = time(NULL);
         server.lastbgsave_status = C_OK;
-    } else if (!bysignal && exitcode != 0) {
+    } else if (!bysignal && exitcode != 0) {    // bgsave 错误
         serverLog(LL_WARNING, "Background saving error");
         server.lastbgsave_status = C_ERR;
-    } else {
+    } else {    // bgsave 被信号终止
         mstime_t latency;
 
         serverLog(LL_WARNING,
             "Background saving terminated by signal %d", bysignal);
         latencyStartMonitor(latency);
+        // 删除临时文件
         rdbRemoveTempFile(server.rdb_child_pid);
         latencyEndMonitor(latency);
         latencyAddSampleIfNeeded("rdb-unlink-temp-file",latency);
@@ -1563,10 +1611,12 @@ void backgroundSaveDoneHandlerSocket(int exitcode, int bysignal) {
 /* When a background RDB saving/transfer terminates, call the right handler. */
 void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     switch(server.rdb_child_type) {
-    case RDB_CHILD_TYPE_DISK:
+    case RDB_CHILD_TYPE_DISK/*1*/:
+        // 有盘的 bgsave 处理
         backgroundSaveDoneHandlerDisk(exitcode,bysignal);
         break;
-    case RDB_CHILD_TYPE_SOCKET:
+    case RDB_CHILD_TYPE_SOCKET/*2*/:
+        // 无盘的 bgsave 处理，主要用在主从中，不传输 RDB 文件，通过 socket 传输 RDB 内容
         backgroundSaveDoneHandlerSocket(exitcode,bysignal);
         break;
     default:
@@ -1758,9 +1808,9 @@ void bgsaveCommand(client *c) {
         }
     }
 
-    if (server.rdb_child_pid != -1) {
+    if (server.rdb_child_pid != -1) {   // 已经有执行中的bgsave
         addReplyError(c,"Background save already in progress");
-    } else if (server.aof_child_pid != -1) {
+    } else if (server.aof_child_pid != -1) {    // 有执行中的aof重写
         if (schedule) {
             server.rdb_bgsave_scheduled = 1;
             addReplyStatus(c,"Background saving scheduled");
@@ -1770,7 +1820,7 @@ void bgsaveCommand(client *c) {
                 "Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenver "
                 "possible.");
         }
-    } else if (rdbSaveBackground(server.rdb_filename) == C_OK) {
+    } else if (rdbSaveBackground(server.rdb_filename) == C_OK) {    // fork 子进程进行 bgsave
         addReplyStatus(c,"Background saving started");
     } else {
         addReply(c,shared.err);

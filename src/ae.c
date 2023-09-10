@@ -133,7 +133,7 @@ void aeStop(aeEventLoop *eventLoop) {
 }
 
 /**
- * 创建文件事件
+ * 注册文件事件
  * @param eventLoop
  * @param fd 文件描述符
  * @param mask 关注事件掩码

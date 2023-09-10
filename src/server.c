@@ -1192,13 +1192,16 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Check if a background saving or AOF rewrite in progress terminated. */
+    // 检查子进程的bgsave 或 aof重写是否完成，进行一些收尾工作
     if (server.rdb_child_pid != -1 || server.aof_child_pid != -1 ||
         ldbPendingChildren())
     {
         int statloc;
         pid_t pid;
 
-        if ((pid = wait3(&statloc,WNOHANG,NULL)) != 0) {
+        // 通过调用 wait3 函数来检查是否存在已结束的子进程
+        // (WNOHANG标识不会阻塞等待子进程结束，返回0表示未结束)
+        if ((pid = wait3(&statloc,WNOHANG,NULL)) != 0) {    // 子进程已结束
             int exitcode = WEXITSTATUS(statloc);
             int bysignal = 0;
 
@@ -1210,9 +1213,9 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                     strerror(errno),
                     (int) server.rdb_child_pid,
                     (int) server.aof_child_pid);
-            } else if (pid == server.rdb_child_pid) {
+            } else if (pid == server.rdb_child_pid) {   // 是rdb bgsave子进程
                 backgroundSaveDoneHandler(exitcode,bysignal);
-            } else if (pid == server.aof_child_pid) {
+            } else if (pid == server.aof_child_pid) {   // 是aof重写子进程
                 backgroundRewriteDoneHandler(exitcode,bysignal);
             } else {
                 if (!ldbRemoveChild(pid)) {
