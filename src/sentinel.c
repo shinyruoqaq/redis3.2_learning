@@ -203,7 +203,7 @@ typedef struct sentinelRedisInstance {
     char *slave_master_host;    /* Master host as reported by INFO */
     int slave_master_port;      /* Master port as reported by INFO */
     int slave_master_link_status; /* Master link status as reported by INFO */
-    unsigned long long slave_repl_offset; /* Slave replication offset. */
+    unsigned long long slave_repl_offset; /* 从节点复制偏移量。Slave replication offset. */
     /* Failover */
     char *leader;       /* If this is a master instance, this is the runid of
                            the Sentinel that should perform the failover. If

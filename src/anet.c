@@ -81,6 +81,12 @@ int anetSetBlock(char *err, int fd, int non_block) {
     return ANET_OK;
 }
 
+/**
+ * 设置socket为非阻塞
+ * @param err
+ * @param fd. socket fd
+ * @return
+ */
 int anetNonBlock(char *err, int fd) {
     return anetSetBlock(err,fd,1);
 }
@@ -262,6 +268,9 @@ static int anetCreateSocket(char *err, int domain) {
     return s;
 }
 
+/**
+ * 请求建立连接
+ */
 #define ANET_CONNECT_NONE 0
 #define ANET_CONNECT_NONBLOCK 1
 #define ANET_CONNECT_BE_BINDING 2 /* Best effort binding. */
@@ -285,9 +294,11 @@ static int anetTcpGenericConnect(char *err, char *addr, int port,
         /* Try to create the socket and to connect it.
          * If we fail in the socket() call, or on connect(), we retry with
          * the next entry in servinfo. */
+        // 创建socket
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
             continue;
         if (anetSetReuseAddr(err,s) == ANET_ERR) goto error;
+        // 设为非阻塞
         if (flags & ANET_CONNECT_NONBLOCK && anetNonBlock(err,s) != ANET_OK)
             goto error;
         if (source_addr) {
@@ -310,6 +321,7 @@ static int anetTcpGenericConnect(char *err, char *addr, int port,
                 goto error;
             }
         }
+        // 建立连接
         if (connect(s,p->ai_addr,p->ai_addrlen) == -1) {
             /* If the socket is non-blocking, it is ok for connect() to
              * return an EINPROGRESS error here. */

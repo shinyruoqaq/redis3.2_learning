@@ -1292,7 +1292,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Replication cron function -- used to reconnect to master,
      * detect transfer failures, start background RDB transfers and so forth.
-     * 主从复制 */
+     * 用来重连到master */
     run_with_period(1000) replicationCron();
 
     /* Run the Redis Cluster cron. */
@@ -2332,7 +2332,7 @@ void call(client *c, int flags) {
     }
 
     /* Propagate the command into the AOF and replication link */
-    // 传播该命令到aof 和 复制
+    // 传播该命令到aof 和 从节点(主从复制)
     if (flags & CMD_CALL_PROPAGATE &&
         (c->flags & CLIENT_PREVENT_PROP) != CLIENT_PREVENT_PROP)
     {

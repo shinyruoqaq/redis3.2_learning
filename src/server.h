@@ -583,9 +583,12 @@ typedef struct readyList {
     robj *key;
 } readyList;
 
-/* With multiplexing we need to take per-client state.
+/*
+ * With multiplexing we need to take per-client state.
  * Clients are taken in a linked list.
- * 多个客户端在server中用链表保存 */
+ * 多个客户端在server中用链表保存.
+ * (从节点会把主节点也视为一个客户端，反过来好像也是)
+ */
 typedef struct client {
     uint64_t id;            /* 自增的唯一客户端id. Client incremental unique ID. */
     int fd;                 /* 客户端socket文件描述符. Client socket. */
@@ -615,9 +618,9 @@ typedef struct client {
     off_t repldboff;        /* 读取传来的RDB文件的偏移量. Replication DB file offset. */
     off_t repldbsize;       /* 传来的RDB文件大小. Replication DB file size. */
     sds replpreamble;       /* 传来的RDB文件的前缀信息. Replication DB preamble. */
-    long long reploff;      /* 如果是master, 已经应用的复制偏移量. Replication offset if this is our master. */
-    long long repl_ack_off; /* 如果是slave, 最后一次发送 REPLCONF ACK 时的偏移量. Replication ack offset, if this is a slave. */
-    long long repl_ack_time;/* 如果是slave, 最后一次发送 REPLCONF ACK 时的时间. Replication ack time, if this is a slave. */
+    long long reploff;      /* 如果client是master, 已经被slave应用的复制偏移量.(master被slave视为一个client，也就是说，这个master指的是从节点保存的客户端) Replication offset if this is our master. */
+    long long repl_ack_off; /* 如果client是slave, 最后一次发送 REPLCONF ACK 时的偏移量. Replication ack offset, if this is a slave. */
+    long long repl_ack_time;/* 如果client是slave, 最后一次发送 REPLCONF ACK 时的时间. Replication ack time, if this is a slave. */
     long long psync_initial_offset; /* FULLRESYNC reply offset other slaves
                                        copying this slave output buffer
                                        should use. */
@@ -746,7 +749,7 @@ struct redisServer {
     char *pidfile;              /* PID file path */
     int arch_bits;              /* 32 or 64 depending on sizeof(long) */
     int cronloops;              /* Number of times the cron function run */
-    char runid[CONFIG_RUN_ID_SIZE+1];  /* ID always different at every exec. */
+    char runid[CONFIG_RUN_ID_SIZE/*40*/+1];  /* 实例启动时生成的40位为唯一id，重启会改变。 ID always different at every exec. */
     int sentinel_mode;          /* True if this instance is a Sentinel. */
     /* Networking */
     int port;                   /* TCP listening port */
@@ -763,7 +766,7 @@ struct redisServer {
     list *clients;              /* List of active clients */
     list *clients_to_close;     /* Clients to close asynchronously */
     list *clients_pending_write; /* There is to write or install handler. */
-    list *slaves, *monitors;    /* List of slaves and MONITORs */
+    list *slaves, *monitors;    /* 从客户端链表。List of slaves and MONITORs */
     client *current_client; /* Current client, only used on crash report */
     int clients_paused;         /* True if clients are currently paused */
     mstime_t clients_pause_end_time; /* Time when we undo clients_paused */
@@ -885,13 +888,13 @@ struct redisServer {
     int syslog_facility;            /* Syslog facility */
     /* Replication (master) */
     int slaveseldb;                 /* Last SELECTed DB in replication output */
-    long long master_repl_offset;   /* Global replication offset */
+    long long master_repl_offset;   /* 主节点复制偏移量，每次 += 命令长度。（即主节点已执行命令的偏移量）Global replication offset */
     int repl_ping_slave_period;     /* 主节点发给从节点的心跳周期，Master pings the slave every N seconds */
-    char *repl_backlog;             /* 复制缓冲区，环形数据结构。Replication backlog for partial syncs */
+    char *repl_backlog;             /* 复制缓冲区，环形数据结构。主节点才有。Replication backlog for partial syncs */
     long long repl_backlog_size;    /* 复制缓冲区大小，默认1MB，Backlog circular buffer size */
     long long repl_backlog_histlen; /* 复制缓冲区数据长度，Backlog actual data length */
     long long repl_backlog_idx;     /* 复制缓冲区末尾索引(即新数据的写入位置)，Backlog circular buffer current offset */
-    long long repl_backlog_off;     /* 复制缓冲区中第一个字节的偏移量，Replication offset of first byte in the
+    long long repl_backlog_off;     /* 复制缓冲区最早保存的有效命令的偏移量，Replication offset of first byte in the
                                        backlog buffer. */
     time_t repl_backlog_time_limit; /* Time without slaves after the backlog
                                        gets released. */
@@ -904,10 +907,10 @@ struct redisServer {
     int repl_diskless_sync_delay;   /* Delay to start a diskless repl BGSAVE. */
     /* Replication (slave) */
     char *masterauth;               /* AUTH with this password with master */
-    char *masterhost;               /* Hostname of master */
-    int masterport;                 /* Port of master */
+    char *masterhost;               /* 从节点上存储的主节点ip. Hostname of master */
+    int masterport;                 /* 从节点上存储的主节点port. Port of master */
     int repl_timeout;               /* Timeout after N seconds of master idle */
-    client *master;     /* Client that is master for this slave */
+    client *master;     /* 从节点的master，被视为一个client. Client that is master for this slave */
     client *cached_master; /* Cached master to be reused for PSYNC. */
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
     int repl_state;          /* Replication status if the instance is a slave */
@@ -915,8 +918,8 @@ struct redisServer {
     off_t repl_transfer_read; /* Amount of RDB read from master during sync. */
     off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */
     int repl_transfer_s;     /* Slave -> Master SYNC socket */
-    int repl_transfer_fd;    /* Slave -> Master SYNC temp file descriptor */
-    char *repl_transfer_tmpfile; /* Slave-> master SYNC temp file name */
+    int repl_transfer_fd;    /* slave用于接收全量同步rdb数据的文件。Slave -> Master SYNC temp file descriptor */
+    char *repl_transfer_tmpfile; /* repl_transfer_fd对应的文件名。Slave-> master SYNC temp file name */
     time_t repl_transfer_lastio; /* Unix time of the latest read, for timeout */
     int repl_serve_stale_data; /* 主从断连后，从节点是否继续处理命令请求。Serve stale data when link is down? */
     int repl_slave_ro;          /* Slave is read only? */
